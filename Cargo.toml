@@ -1,0 +1,32 @@
+[package]
+name = "shadps5"
+version = "0.1.0"
+edition = "2021"
+authors = ["Antigravity & User"]
+description = "A high-level PlayStation 5 emulator written in Rust using SDL2 and Vulkan."
+
+[dependencies]
+# SDL2 for cross-platform windowing, inputs, and events
+sdl2 = { version = "0.37.0" }
+
+# Ash for Vulkan bindings
+ash = "0.38.0"
+
+# Object for ELF executable parsing (Prospero OS runs standard and encrypted ELF format)
+object = { version = "0.32.0", features = ["read"] }
+
+# Logging utilities
+log = "0.4.20"
+env_logger = "0.11.0"
+
+# Platform-specific dependencies for OS system call translation
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.150"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52.0", features = [
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_Foundation"
+] }

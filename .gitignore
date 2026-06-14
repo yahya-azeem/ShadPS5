@@ -1,0 +1,50 @@
+# Build artifacts
+/target
+
+/960/
+
+# Commercial game content
+/game_root/
+
+/reference
+/ShadPS5-reference/
+
+# Scratch / working files
+/scratch/
+
+# Object files and ELF binaries
+**/*.o
+**/*.elf
+!tests/**/*.elf
+
+# SPIR-V shaders
+*.spv
+
+# Log and error output files
+*.log
+*.err
+out
+out.txt
+run_err.txt
+run_output.txt
+run.log
+run.err
+stdout.log
+stderr.log
+debug_run*.log
+emulator_run.log
+run_game*.log
+run_now.log
+symbol_scan.log
+cargo_check.*
+check_output.txt
+
+# Debug/scratch data files
+full_maps.txt
+resolved_symbols.txt
+scratch_symbols.txt
+eboot_code.bin
+eboot_func*.bin
+
+# Python cache
+**/__pycache__/
