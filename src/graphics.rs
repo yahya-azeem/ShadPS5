@@ -92,7 +92,7 @@ pub struct VulkanContext {
     _entry: Entry,
     instance: Instance,
     physical_device: vk::PhysicalDevice,
-    device: Device,
+    pub(crate) device: Device,
     queue: vk::Queue,
     device_name: String,
 
@@ -134,6 +134,9 @@ pub struct VulkanContext {
     // Compute Shader pipeline cache
     compute_pipeline_cache: Mutex<HashMap<ComputeTask, CachedComputePipeline>>,
     pipeline_cache: vk::PipelineCache,
+
+    // Cached guest draw state for persistent replay every frame
+    cached_draw_call: Mutex<Option<PendingDrawCall>>,
 }
 
 impl VulkanContext {
@@ -154,11 +157,16 @@ impl VulkanContext {
             .map(|&name| CString::new(name).unwrap())
             .collect();
         extension_names_c.push(CString::new("VK_KHR_surface").unwrap());
+        let debug_ext_name = CString::new("VK_EXT_debug_utils").unwrap();
+        extension_names_c.push(debug_ext_name.clone());
 
         let extension_names_ptrs: Vec<*const c_char> = extension_names_c
             .iter()
             .map(|c_str| c_str.as_ptr())
             .collect();
+
+        let layer_names: Vec<CString> = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
+        let layer_names_ptrs: Vec<*const c_char> = layer_names.iter().map(|c| c.as_ptr()).collect();
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app_name)
@@ -169,13 +177,26 @@ impl VulkanContext {
 
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(&extension_names_ptrs);
+            .enabled_extension_names(&extension_names_ptrs)
+            .enabled_layer_names(&layer_names_ptrs);
 
-        info!("Creating Vulkan Instance...");
-        let instance = unsafe {
-            entry
-                .create_instance(&create_info, None)
-                .map_err(|e| format!("Failed to create Vulkan instance: {:?}", e))?
+        info!("Creating Vulkan Instance with validation layers...");
+        let instance = match unsafe { entry.create_instance(&create_info, None) } {
+            Ok(inst) => {
+                info!("Vulkan instance (with validation) created successfully.");
+                inst
+            }
+            Err(e) => {
+                warn!("Validation layers not available: {:?}. Retrying without them.", e);
+                let fb_ext_ptrs: Vec<*const c_char> = extension_names_c[..extension_names_c.len()-1].iter().map(|c| c.as_ptr()).collect();
+                let fallback_info = vk::InstanceCreateInfo::default()
+                    .application_info(&app_info)
+                    .enabled_extension_names(&fb_ext_ptrs);
+                unsafe {
+                    entry.create_instance(&fallback_info, None)
+                        .map_err(|e| format!("Failed to create Vulkan instance: {:?}", e))?
+                }
+            }
         };
 
         // Surface creation using SDL2
@@ -715,6 +736,8 @@ impl VulkanContext {
             desc_pools_to_destroy: Mutex::new(vec![Vec::new(); MAX_FRAMES_IN_FLIGHT]),
             compute_pipeline_cache: Mutex::new(HashMap::new()),
             pipeline_cache,
+
+            cached_draw_call: Mutex::new(None),
         })
     }
 
@@ -817,30 +840,38 @@ impl VulkanContext {
                 log::debug!("Syncing write-watched dirty page: 0x{:X} (size: {} bytes)", addr, len);
             });
 
-            // Drain and replay any pending guest draw calls
-            let mut pending = PENDING_DRAWS.lock().unwrap();
-            for draw_call in pending.drain(..) {
-                if draw_call.pipeline != vk::Pipeline::null() {
-                    info!("Replaying guest draw with compiled pipeline PSO: {:?}", draw_call.pipeline);
-                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::GRAPHICS, draw_call.pipeline);
+            // Drain and cache any pending guest draw calls for persistent replay
+            {
+                let mut pending = PENDING_DRAWS.lock().unwrap();
+                for draw_call in pending.drain(..) {
+                    if draw_call.pipeline != vk::Pipeline::null() {
+                        *self.cached_draw_call.lock().unwrap() = Some(draw_call);
+                    }
+                }
+            }
+
+            // Replay cached guest draw every frame
+            if let Some(dc) = *self.cached_draw_call.lock().unwrap() {
+                if dc.pipeline != vk::Pipeline::null() {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::GRAPHICS, dc.pipeline);
 
                     // Dynamic Viewport
                     let viewport = vk::Viewport {
-                        x: draw_call.viewport_x,
-                        y: draw_call.viewport_y,
-                        width: if draw_call.viewport_width > 0.0 { draw_call.viewport_width } else { self.swapchain_extent.width as f32 },
-                        height: if draw_call.viewport_height > 0.0 { draw_call.viewport_height } else { self.swapchain_extent.height as f32 },
-                        min_depth: draw_call.viewport_min_depth,
-                        max_depth: draw_call.viewport_max_depth,
+                        x: dc.viewport_x,
+                        y: dc.viewport_y,
+                        width: if dc.viewport_width > 0.0 { dc.viewport_width } else { self.swapchain_extent.width as f32 },
+                        height: if dc.viewport_height > 0.0 { dc.viewport_height } else { self.swapchain_extent.height as f32 },
+                        min_depth: dc.viewport_min_depth,
+                        max_depth: dc.viewport_max_depth,
                     };
                     device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
 
                     // Dynamic Scissor
                     let scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: draw_call.scissor_x, y: draw_call.scissor_y },
+                        offset: vk::Offset2D { x: dc.scissor_x, y: dc.scissor_y },
                         extent: vk::Extent2D {
-                            width: if draw_call.scissor_width > 0 { draw_call.scissor_width } else { self.swapchain_extent.width },
-                            height: if draw_call.scissor_height > 0 { draw_call.scissor_height } else { self.swapchain_extent.height },
+                            width: if dc.scissor_width > 0 { dc.scissor_width } else { self.swapchain_extent.width },
+                            height: if dc.scissor_height > 0 { dc.scissor_height } else { self.swapchain_extent.height },
                         },
                     };
                     device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
@@ -849,39 +880,37 @@ impl VulkanContext {
                     let mut temp_mems = Vec::new();
                     
                     // 1. Vertex Buffer Binding
-                    if draw_call.vertex_buffer_gpu_addr != 0 {
-                        let host_addr = crate::kernel::translate_guest_addr(draw_call.vertex_buffer_gpu_addr)
-                            .unwrap_or(draw_call.vertex_buffer_gpu_addr);
-                        let size = draw_call.vertex_buffer_size as usize;
+                    if dc.vertex_buffer_gpu_addr != 0 {
+                        let host_addr = crate::kernel::translate_guest_addr(dc.vertex_buffer_gpu_addr)
+                            .unwrap_or(dc.vertex_buffer_gpu_addr);
+                        let size = dc.vertex_buffer_size as usize;
                         if size > 0 && host_addr >= 0x1000 {
                             let vertex_data = std::slice::from_raw_parts(host_addr as *const u8, size);
                             let (vk_buf, vk_mem) = self.create_vertex_buffer(vertex_data);
                             device.cmd_bind_vertex_buffers(cmd_buffer, 0, &[vk_buf], &[0]);
                             temp_buffers.push(vk_buf);
                             temp_mems.push(vk_mem);
-                            info!("  --> Successfully bound HLE vertex buffer containing {} bytes.", size);
                         }
                     }
                     
                     // 2. Index Buffer Binding
                     let mut has_index_buffer = false;
-                    if draw_call.index_buffer_gpu_addr != 0 {
-                        let host_addr = crate::kernel::translate_guest_addr(draw_call.index_buffer_gpu_addr)
-                            .unwrap_or(draw_call.index_buffer_gpu_addr);
-                        let stride = match draw_call.index_type {
+                    if dc.index_buffer_gpu_addr != 0 {
+                        let host_addr = crate::kernel::translate_guest_addr(dc.index_buffer_gpu_addr)
+                            .unwrap_or(dc.index_buffer_gpu_addr);
+                        let stride = match dc.index_type {
                             vk::IndexType::UINT16 => 2,
                             vk::IndexType::UINT32 => 4,
                             _ => 2,
                         };
-                        let size = (draw_call.index_buffer_count as usize) * stride;
+                        let size = (dc.index_buffer_count as usize) * stride;
                         if size > 0 && host_addr >= 0x1000 {
                             let index_data = std::slice::from_raw_parts(host_addr as *const u8, size);
                             let (vk_buf, vk_mem) = self.create_index_buffer(index_data);
-                            device.cmd_bind_index_buffer(cmd_buffer, vk_buf, 0, draw_call.index_type);
+                            device.cmd_bind_index_buffer(cmd_buffer, vk_buf, 0, dc.index_type);
                             temp_buffers.push(vk_buf);
                             temp_mems.push(vk_mem);
                             has_index_buffer = true;
-                            info!("  --> Successfully bound HLE index buffer containing {} bytes (count: {}, type: {:?}).", size, draw_call.index_buffer_count, draw_call.index_type);
                         }
                     }
 
@@ -891,16 +920,16 @@ impl VulkanContext {
                     let mut temp_image_views = Vec::new();
                     let mut temp_samplers = Vec::new();
 
-                    if draw_call.descriptor_set_layout != vk::DescriptorSetLayout::null() {
+                    if dc.descriptor_set_layout != vk::DescriptorSetLayout::null() {
                         let mut pool_sizes = Vec::new();
-                        if draw_call.constant_buffer_gpu_addr != 0 {
+                        if dc.constant_buffer_gpu_addr != 0 {
                             pool_sizes.push(
                                 vk::DescriptorPoolSize::default()
                                     .ty(vk::DescriptorType::UNIFORM_BUFFER)
                                     .descriptor_count(1),
                             );
                         }
-                        if draw_call.texture_gpu_addr != 0 {
+                        if dc.texture_gpu_addr != 0 {
                             pool_sizes.push(
                                 vk::DescriptorPoolSize::default()
                                     .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -914,7 +943,7 @@ impl VulkanContext {
                                 .pool_sizes(&pool_sizes);
                             desc_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
 
-                            let layouts = [draw_call.descriptor_set_layout];
+                            let layouts = [dc.descriptor_set_layout];
                             let alloc_info = vk::DescriptorSetAllocateInfo::default()
                                 .descriptor_pool(desc_pool)
                                 .set_layouts(&layouts);
@@ -924,10 +953,10 @@ impl VulkanContext {
                             let mut buffer_info_vk = vk::DescriptorBufferInfo::default();
                             let mut image_info_vk = vk::DescriptorImageInfo::default();
 
-                            if draw_call.constant_buffer_gpu_addr != 0 {
-                                let host_addr = crate::kernel::translate_guest_addr(draw_call.constant_buffer_gpu_addr)
-                                    .unwrap_or(draw_call.constant_buffer_gpu_addr);
-                                let size = draw_call.constant_buffer_size as usize;
+                            if dc.constant_buffer_gpu_addr != 0 {
+                                let host_addr = crate::kernel::translate_guest_addr(dc.constant_buffer_gpu_addr)
+                                    .unwrap_or(dc.constant_buffer_gpu_addr);
+                                let size = dc.constant_buffer_size as usize;
                                 if size > 0 && host_addr >= 0x1000 {
                                     let cbuf_data = std::slice::from_raw_parts(host_addr as *const u8, size);
                                     let (vk_buf, vk_mem) = self.create_uniform_buffer(cbuf_data);
@@ -949,12 +978,12 @@ impl VulkanContext {
                                 }
                             }
 
-                            if draw_call.texture_gpu_addr != 0 {
-                                let host_addr = crate::kernel::translate_guest_addr(draw_call.texture_gpu_addr)
-                                    .unwrap_or(draw_call.texture_gpu_addr);
-                                let width = draw_call.texture_width;
-                                let height = draw_call.texture_height;
-                                let format = draw_call.texture_format;
+                            if dc.texture_gpu_addr != 0 {
+                                let host_addr = crate::kernel::translate_guest_addr(dc.texture_gpu_addr)
+                                    .unwrap_or(dc.texture_gpu_addr);
+                                let width = dc.texture_width;
+                                let height = dc.texture_height;
+                                let format = dc.texture_format;
                                 let bpp = match format {
                                     4 => 1, // R8_UNORM
                                     _ => 4, // RGBA/BGRA
@@ -968,7 +997,6 @@ impl VulkanContext {
                                     temp_image_views.push(vk_view);
                                     temp_samplers.push(vk_sampler);
 
-                                    // Transition layout inline
                                     let image_barrier = vk::ImageMemoryBarrier::default()
                                         .old_layout(vk::ImageLayout::PREINITIALIZED)
                                         .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1010,29 +1038,27 @@ impl VulkanContext {
 
                             if !writes.is_empty() {
                                 device.update_descriptor_sets(&writes, &[]);
-
                                 device.cmd_bind_descriptor_sets(
                                     cmd_buffer,
                                     vk::PipelineBindPoint::GRAPHICS,
-                                    draw_call.pipeline_layout,
+                                    dc.pipeline_layout,
                                     0,
                                     &[desc_set],
                                     &[],
                                 );
-                                info!("  --> Successfully bound HLE descriptor set (uniforms/textures) to graphics pipeline.");
                             }
                         }
                     }
 
                     // 4. Execution Draw Call
                     if has_index_buffer {
-                        device.cmd_draw_indexed(cmd_buffer, draw_call.index_buffer_count, 1, 0, 0, 0);
+                        device.cmd_draw_indexed(cmd_buffer, dc.index_buffer_count, 1, 0, 0, 0);
                     } else {
-                        let vertex_count = if draw_call.index_buffer_count > 0 { draw_call.index_buffer_count } else { 3 };
+                        let vertex_count = if dc.index_buffer_count > 0 { dc.index_buffer_count } else { 3 };
                         device.cmd_draw(cmd_buffer, vertex_count, 1, 0, 0);
                     }
                     
-                    // 5. Clean up temporary resources (Deferred to prevent Vulkan resource lifetime violation)
+                    // 5. Clean up temporary resources (Deferred)
                     if !temp_buffers.is_empty() {
                         self.buffers_to_destroy.lock().unwrap()[current_frame_val].extend(temp_buffers);
                     }
@@ -1314,9 +1340,10 @@ impl VulkanContext {
             .write_mask(0xFF)
             .reference(1);
 
+        // DIAGNOSTIC: force depth off to rule out depth test culling all fragments
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(state.depth_test_enable)
-            .depth_write_enable(state.depth_write_enable)
+            .depth_test_enable(false)
+            .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .stencil_test_enable(state.stencil_test_enable)
             .front(stencil_op_state)
@@ -2141,8 +2168,16 @@ thread_local! {
 
 /// Helper to dispatch compile & queue draw call from an active state
 unsafe fn dispatch_draw_for_state(state: ActiveGraphicsState) {
-    info!("      - Compiling PSO: VS=0x{:X}, FS=0x{:X}, Topology={:?}, DepthTest={}",
-          state.vertex_shader_gpu_addr, state.fragment_shader_gpu_addr, state.topology, state.depth_test_enable);
+    info!("      - Compiling PSO: VS=0x{:X}, FS=0x{:X}, Topology={:?}, DepthTest={}, HasVB={}, HasTex={}, HasCB={}, ColorMask={}",
+          state.vertex_shader_gpu_addr, state.fragment_shader_gpu_addr, state.topology, state.depth_test_enable,
+          state.vertex_buffer_gpu_addr != 0, state.texture_gpu_addr != 0, state.constant_buffer_gpu_addr != 0,
+          state.color_write_mask);
+
+    // DIAGNOSTIC: force depth test and write off, force color write mask
+    let mut state = state;
+    state.depth_test_enable = false;
+    state.depth_write_enable = false;
+    state.color_write_mask = 15; // RGBA
 
     let read_shader_code = |gpu_addr: u64| -> Vec<u32> {
         if gpu_addr == 0 {
@@ -2327,6 +2362,9 @@ pub unsafe fn decode_pm4_command_buffer(dcb_gpu_addr: u64, dcb_size_in_dwords: u
         return;
     }
     let stream = std::slice::from_raw_parts(ptr, dcb_size_in_dwords as usize);
+    for (di, &dw) in stream.iter().enumerate() {
+        info!("  raw[{di:2}]=0x{dw:08X}");
+    }
     let mut i = 0;
     while i < stream.len() {
         let header = stream[i];
@@ -2376,42 +2414,17 @@ pub unsafe fn decode_pm4_command_buffer(dcb_gpu_addr: u64, dcb_size_in_dwords: u
                         dispatch_draw_for_state(state);
                     }
                     0x28 => {
-                        let is_mock_draw = count >= 1 && i + 1 < stream.len() && stream[i + 1] == 0x66666666;
-                        if is_mock_draw {
-                            info!("    --> OP_DRAW_INDEX_2 (Mock Draw): Dispatching Vulkan vkCmdDrawIndexed");
-                            let state = {
-                                let s = ACTIVE_STATE.lock().unwrap();
-                                s.clone()
-                            };
-                            dispatch_draw_for_state(state);
-                        } else {
-                            info!("    --> OP_SET_CONTEXT_REG: Updating context register descriptor state");
-                            if count >= 1 && i + 1 < stream.len() {
-                                let reg_offset = stream[i + 1];
-                                for reg_idx in 0..count as usize {
-                                    if i + 2 + reg_idx < stream.len() {
-                                        let val = stream[i + 2 + reg_idx];
-                                        let current_reg = reg_offset + reg_idx as u32;
-                                        info!("      - Context Register 0x{:X} = 0x{:X}", current_reg, val);
-
-                                        let mut state = ACTIVE_STATE.lock().unwrap();
-                                        if current_reg == 0x1000 {
-                                            state.vertex_shader_gpu_addr = (state.vertex_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
-                                        } else if current_reg == 0x1001 {
-                                            state.vertex_shader_gpu_addr = (state.vertex_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
-                                        } else if current_reg == 0x1002 {
-                                            state.fragment_shader_gpu_addr = (state.fragment_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
-                                        } else if current_reg == 0x1003 {
-                                            state.fragment_shader_gpu_addr = (state.fragment_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
-                                        } else if current_reg == 0x100E {
-                                            state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
-                                        } else if current_reg == 0x100F {
-                                            state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
-                                        }
-                                    }
-                                }
+                        info!("    --> OP_DRAW_INDEX_2: Dispatching Vulkan vkCmdDrawIndexed (count={})", count);
+                        if count >= 1 && i + 1 < stream.len() {
+                            for d in 0..count.min(8) as usize {
+                                info!("      - data[{d}]=0x{:08X}", stream[i + 1 + d]);
                             }
                         }
+                        let state = {
+                            let s = ACTIVE_STATE.lock().unwrap();
+                            s.clone()
+                        };
+                        dispatch_draw_for_state(state);
                     }
                     0x2C => {
                         info!("    --> OP_SET_SH_REG: Updating shader register descriptor state");
@@ -2432,15 +2445,12 @@ pub unsafe fn decode_pm4_command_buffer(dcb_gpu_addr: u64, dcb_size_in_dwords: u
                                         state.fragment_shader_gpu_addr = (state.fragment_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
                                     } else if current_reg == 0x1003 {
                                         state.fragment_shader_gpu_addr = (state.fragment_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
-                                    } else if current_reg == 0x100E {
-                                        state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
-                                    } else if current_reg == 0x100F {
-                                        state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
                                     } else if current_reg == 0x1004 {
                                         state.topology = match val {
                                             0 => vk::PrimitiveTopology::POINT_LIST,
                                             1 => vk::PrimitiveTopology::LINE_LIST,
                                             2 => vk::PrimitiveTopology::TRIANGLE_LIST,
+                                            3 => vk::PrimitiveTopology::TRIANGLE_STRIP,
                                             _ => vk::PrimitiveTopology::TRIANGLE_LIST,
                                         };
                                     } else if current_reg == 0x1005 {
@@ -2460,24 +2470,16 @@ pub unsafe fn decode_pm4_command_buffer(dcb_gpu_addr: u64, dcb_size_in_dwords: u
                                         state.index_buffer_gpu_addr = (state.index_buffer_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
                                     } else if current_reg == 0x100D {
                                         state.index_buffer_count = val;
+                                    } else if current_reg == 0x100E {
+                                        state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
+                                    } else if current_reg == 0x100F {
+                                        state.compute_shader_gpu_addr = (state.compute_shader_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
                                     } else if current_reg == 0x1010 {
                                         state.constant_buffer_gpu_addr = (state.constant_buffer_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
                                     } else if current_reg == 0x1011 {
                                         state.constant_buffer_gpu_addr = (state.constant_buffer_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
                                     } else if current_reg == 0x1012 {
                                         state.constant_buffer_size = val;
-                                    } else if current_reg == 0x1015 {
-                                        state.texture_gpu_addr = (state.texture_gpu_addr & 0xFFFFFFFF00000000) | (val as u64);
-                                    } else if current_reg == 0x1016 {
-                                        state.texture_gpu_addr = (state.texture_gpu_addr & 0x00000000FFFFFFFF) | ((val as u64) << 32);
-                                    } else if current_reg == 0x1017 {
-                                        state.texture_width = val;
-                                    } else if current_reg == 0x1018 {
-                                        state.texture_height = val;
-                                    } else if current_reg == 0x1019 {
-                                        state.texture_format = val;
-                                    } else if current_reg == 0x101C {
-                                        state.sampler_filter = val;
                                     } else if current_reg == 0x1020 {
                                         state.blend_enable = val != 0;
                                     } else if current_reg == 0x1021 {
@@ -2638,6 +2640,58 @@ pub unsafe fn decode_pm4_command_buffer(dcb_gpu_addr: u64, dcb_size_in_dwords: u
     }
 }
 
+#[repr(C)]
+pub struct ShaderRegister {
+    pub offset: u32,
+    pub value: u32,
+}
+
+#[repr(C)]
+pub struct RegisterDefaults {
+    pub tbl0: *const *const ShaderRegister,
+    pub tbl1: *const *const ShaderRegister,
+    pub tbl2: *const *const ShaderRegister,
+    pub tbl3: *const *const ShaderRegister,
+    pub unknown: [u64; 2],
+    pub types: *const u32,
+    pub count: u32,
+}
+
+unsafe impl Sync for RegisterDefaults {}
+unsafe impl Send for RegisterDefaults {}
+
+static DUMMY_REG_DEFAULTS_1: RegisterDefaults = RegisterDefaults {
+    tbl0: std::ptr::null(),
+    tbl1: std::ptr::null(),
+    tbl2: std::ptr::null(),
+    tbl3: std::ptr::null(),
+    unknown: [0, 0],
+    types: std::ptr::null(),
+    count: 0,
+};
+
+static DUMMY_REG_DEFAULTS_2: RegisterDefaults = RegisterDefaults {
+    tbl0: std::ptr::null(),
+    tbl1: std::ptr::null(),
+    tbl2: std::ptr::null(),
+    tbl3: std::ptr::null(),
+    unknown: [0, 0],
+    types: std::ptr::null(),
+    count: 0,
+};
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcGetRegisterDefaults2(ver: u32) -> *const RegisterDefaults {
+    info!("API Graphics Intercepted: sceAgcGetRegisterDefaults2 | version: {}", ver);
+    &DUMMY_REG_DEFAULTS_1
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcGetRegisterDefaults2Internal(ver: u32) -> *const RegisterDefaults {
+    info!("API Graphics Intercepted: sceAgcGetRegisterDefaults2Internal | version: {}", ver);
+    &DUMMY_REG_DEFAULTS_2
+}
+
 /// Resolves raw pointer and invokes the decoder.
 #[no_mangle]
 pub unsafe extern "sysv64" fn sceAgcSubmitGraphics(
@@ -2670,6 +2724,2008 @@ pub unsafe extern "sysv64" fn sceAgcSubmitAsyncCompute(
 #[no_mangle]
 pub extern "sysv64" fn sceAgcSuspendPoint() -> i32 {
     info!("API Graphics Intercepted: sceAgcSuspendPoint | Draining pipeline cache structures...");
+    0
+}
+
+/// Creates a shader object for the AGC (AMD GPU Compute) pipeline.
+///
+/// Called by the game's GPU resource registration helper at 0x41d0 (via PLT stub 0x5264e0).
+///
+/// # Arguments
+/// * `rdi` - Output pointer where the shader object pointer is written (*mut *mut u8)
+/// * `rsi` - Pointer to shader config struct (starts with magic "1234\x18", binary data at offset 0x18, size at offset 0x20)
+/// * `rdx` - Pointer to data descriptor (first byte checked to be 0x00 for valid descriptors)
+///
+/// # Returns
+/// 0 on success, error code otherwise
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCreateShader(
+    output_ptr: *mut *mut u8,
+    name_config: *const u8,
+    data_descriptor: *const u8,
+) -> i32 {
+    if output_ptr.is_null() || name_config.is_null() || data_descriptor.is_null() {
+        warn!("sceAgcCreateShader: NULL argument(s)");
+        return -1972633590;
+    }
+
+    // Read binary offset and size from the config struct
+    // config layout:
+    //   0x00: u32 magic "1234" + u32 header_size
+    //   0x08: u64 flags/version
+    //   0x10: u64 padding
+    //   0x18: u64 binary_offset (from config struct start)
+    //   0x20: u64 binary_size
+    let binary_offset = *(name_config.add(0x18) as *const u64) as usize;
+    let binary_size = *(name_config.add(0x20) as *const u64) as usize;
+
+    // Clamp size to reasonable bounds
+    let size = if binary_size > 0 && binary_size < 0x100000 { binary_size } else { 0 };
+
+    // Allocate the shader object: minimum 0x48 bytes (needs field at offset 0x44)
+    let obj_size = std::cmp::max(0x50, 0x48);
+    let shader_obj = crate::kernel::hle_malloc(obj_size);
+    if shader_obj.is_null() {
+        error!("sceAgcCreateShader: failed to allocate shader object");
+        return -1972633590;
+    }
+    // Zero out the object
+    std::ptr::write_bytes(shader_obj, 0, obj_size);
+
+    // If there's binary data in the config, copy it
+    if size > 0 {
+        let binary_src = name_config.add(binary_offset);
+        // Check if binary data is within reasonable bounds
+        let binary_data = crate::kernel::hle_malloc(size);
+        if !binary_data.is_null() {
+            std::ptr::copy_nonoverlapping(binary_src, binary_data, size);
+
+            // Set field at offset 0x10: pointer to the binary data
+            *(shader_obj.add(0x10) as *mut *mut u8) = binary_data;
+            // Set field at offset 0x44: size of the binary data
+            *(shader_obj.add(0x44) as *mut u32) = size as u32;
+        }
+    }
+
+    // Write the shader object pointer to the output
+    *output_ptr = shader_obj;
+
+    info!(
+        "sceAgcCreateShader: created shader obj={:p} binary_offset=0x{:x} binary_size=0x{:x}",
+        shader_obj, binary_offset, size
+    );
+
+    0
+}
+
+/// =========================================================================
+/// AGC Constants (from sharpemu/AMD PM4 specification)
+/// =========================================================================
+const IT_NOP: u32 = 0x10;
+const IT_SET_BASE: u32 = 0x11;
+const IT_INDEX_BUFFER_SIZE: u32 = 0x13;
+const IT_INDEX_BASE: u32 = 0x26;
+const IT_DRAW_INDIRECT: u32 = 0x24;
+const IT_DRAW_INDEX_INDIRECT: u32 = 0x25;
+const IT_DRAW_INDEX_2: u32 = 0x27;
+const IT_INDEX_TYPE: u32 = 0x2A;
+const IT_DRAW_INDEX_AUTO: u32 = 0x2D;
+const IT_NUM_INSTANCES: u32 = 0x2F;
+const IT_DRAW_INDEX_OFFSET_2: u32 = 0x35;
+const IT_WRITE_DATA: u32 = 0x37;
+const IT_DISPATCH_DIRECT: u32 = 0x15;
+const IT_DISPATCH_INDIRECT: u32 = 0x16;
+const IT_WAIT_REG_MEM: u32 = 0x3C;
+const IT_INDIRECT_BUFFER: u32 = 0x3F;
+const IT_EVENT_WRITE: u32 = 0x46;
+const IT_RELEASE_MEM: u32 = 0x49;
+const IT_DMA_DATA: u32 = 0x50;
+const IT_SET_CONTEXT_REG: u32 = 0x69;
+const IT_SET_SH_REG: u32 = 0x76;
+const IT_SET_UCONFIG_REG: u32 = 0x79;
+const IT_GET_LOD_STATS: u32 = 0x8E;
+
+// NOP sub-register opcodes
+const R_ZERO: u32 = 0x00;
+const R_DRAW_INDEX_AUTO: u32 = 0x04;
+const R_DRAW_RESET: u32 = 0x05;
+const R_WAIT_FLIP_DONE: u32 = 0x06;
+const R_ACB_RESET: u32 = 0x09;
+const R_WAIT_MEM32: u32 = 0x0A;
+const R_PUSH_MARKER: u32 = 0x0B;
+const R_POP_MARKER: u32 = 0x0C;
+const R_SH_REGS_INDIRECT: u32 = 0x11;
+const R_CX_REGS_INDIRECT: u32 = 0x12;
+const R_UC_REGS_INDIRECT: u32 = 0x13;
+const R_ACQUIRE_MEM: u32 = 0x14;
+const R_WRITE_DATA: u32 = 0x15;
+const R_WAIT_MEM64: u32 = 0x16;
+const R_FLIP: u32 = 0x17;
+const R_RELEASE_MEM: u32 = 0x18;
+const R_DMA_DATA: u32 = 0x19;
+const R_INDEX_BASE: u32 = 0x1B;
+const R_INDEX_COUNT: u32 = 0x1C;
+
+fn pm4_header(dword_count: u32, op: u32, reg: u32) -> u32 {
+    ((dword_count - 2) << 16) | ((op & 0xFF) << 8) | (reg & 0x3F)
+}
+
+unsafe fn read_guest_u32(addr: u64) -> Option<u32> {
+    let host = crate::kernel::translate_guest_addr(addr)?;
+    Some(*(host as *const u32))
+}
+
+unsafe fn read_guest_u64(addr: u64) -> Option<u64> {
+    let host = crate::kernel::translate_guest_addr(addr)?;
+    Some(*(host as *const u64))
+}
+
+unsafe fn write_guest_u32(addr: u64, val: u32) -> bool {
+    let host = crate::kernel::translate_guest_addr(addr);
+    match host {
+        Some(h) => {
+            *(h as *mut u32) = val;
+            true
+        }
+        None => false,
+    }
+}
+
+unsafe fn write_guest_u64(addr: u64, val: u64) -> bool {
+    let host = crate::kernel::translate_guest_addr(addr);
+    match host {
+        Some(h) => {
+            *(h as *mut u64) = val;
+            true
+        }
+        None => false,
+    }
+}
+
+unsafe fn try_allocate_command_dwords(cmd_buf: u64, dword_count: u32) -> Option<u64> {
+    let cursor_addr = cmd_buf.wrapping_add(0x10);
+    let cursor = read_guest_u64(cursor_addr)?;
+    if cursor == 0 {
+        return None;
+    }
+    let size = (dword_count as u64).wrapping_mul(4);
+    write_guest_u64(cursor_addr, cursor.wrapping_add(size));
+    Some(cursor)
+}
+
+fn return_pointer(ptr: u64) -> u64 {
+    ptr
+}
+
+/// =========================================================================
+/// Driver Registration Functions
+/// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverInitResourceRegistration(
+    resource_registration_memory: u64,
+    size: u64,
+    max_owners: u32,
+) -> i32 {
+    info!(
+        "API: sceAgcDriverInitResourceRegistration | memory=0x{:X} size=0x{:X} max_owners={}",
+        resource_registration_memory, size, max_owners
+    );
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(
+    max_owners: u32,
+    max_resources_per_owner: u32,
+    out_size: *mut u64,
+) -> i32 {
+    info!(
+        "API: sceAgcDriverQueryResourceRegistrationUserMemoryRequirements | max_owners={} max_resources={}",
+        max_owners, max_resources_per_owner
+    );
+    if out_size.is_null() {
+        return -1972633590;
+    }
+    // Each resource: 0x118 bytes, each owner: 0x1E0 bytes
+    let total = (max_owners as u64) * 0x1E0 + (max_owners as u64) * (max_resources_per_owner as u64) * 0x118;
+    *out_size = total + 0x1000;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceRegistrationMaxNameLength(
+    out_length: *mut u32,
+) -> i32 {
+    if out_length.is_null() {
+        return -1972633590;
+    }
+    *out_length = 256;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRegisterDefaultOwner(
+    owner: u32,
+) -> i32 {
+    info!("API: sceAgcDriverRegisterDefaultOwner | owner={}", owner);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRegisterOwner(
+    owner: u32,
+    name: *const u8,
+) -> i32 {
+    info!("API: sceAgcDriverRegisterOwner | owner={} name={:p}", owner, name);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetDefaultOwner(
+    out_owner: *mut u32,
+) -> i32 {
+    if out_owner.is_null() {
+        return -1972633590;
+    }
+    *out_owner = 1;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRegisterResource(
+    resource: u64,
+    owner: u32,
+    name: *const u8,
+    _arg3: u64,
+    _arg4: u64,
+    _type: u32,
+    flags: u32,
+) -> i32 {
+    info!(
+        "API: sceAgcDriverRegisterResource | resource=0x{:X} owner={} name={:p} type={} flags=0x{:X}",
+        resource, owner, name, _type, flags
+    );
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverUnregisterResource(
+    resource: u64,
+) -> i32 {
+    info!("API: sceAgcDriverUnregisterResource | resource=0x{:X}", resource);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverAddEqEvent(
+    equeue: u64,
+    event_id: u64,
+    user_data: u64,
+) -> i32 {
+    info!("API: sceAgcDriverAddEqEvent | eq=0x{:X} id=0x{:X} udata=0x{:X}", equeue, event_id, user_data);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverDeleteEqEvent(
+    equeue: u64,
+    event_id: u64,
+) -> i32 {
+    info!("API: sceAgcDriverDeleteEqEvent | eq=0x{:X} id=0x{:X}", equeue, event_id);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceShaderGuid(
+    _arg0: u64, _arg1: u64, _arg2: u64, _arg3: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetOwnerName(
+    _owner: u32, _name: *mut u8, _size: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceBaseAddressAndSizeInBytes(
+    _resource: u64, _out_addr: *mut u64, _out_size: *mut u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceType(
+    _resource: u64, _out_type: *mut u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceName(
+    _resource: u64, _out_name: *mut u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetResourceUserData(
+    _resource: u64, _out_data: *mut u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSetResourceUserData(
+    _resource: u64, _user_data: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverUnregisterAllResourcesForOwner(
+    _owner: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverUnregisterOwnerAndResources(
+    _owner: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSubmitMultiAcbs(
+    _arg0: u64, _arg1: u64, _arg2: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSubmitMultiDcbs(
+    _arg0: u64, _arg1: u64, _arg2: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRegisterGdsResource(
+    _arg0: u64, _arg1: u32, _arg2: u64, _arg3: u32, _arg4: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverIsSubmitValidationEnabled() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetShaderDebuggingStatus() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRegisterWorkloadStream(
+    _arg0: u64, _arg1: u64, _arg2: u64, _arg3: u32, _arg4: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverUnregisterWorkloadStream(
+    _arg0: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSetValidationErrorOutputFrequency(
+    _arg0: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverIsTraceInProgress() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverIsCaptureInProgress() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverTriggerCapture() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRequestCaptureStart() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverRequestCaptureStop() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetEqEventType(
+    _arg0: u64, _arg1: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverGetEqContextId(
+    _arg0: u64, _arg1: *mut u32,
+) -> i32 {
+    0
+}
+
+/// =========================================================================
+/// PM4 Packet Builder Functions
+/// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbNop(
+    command_buffer: u64,
+    dword_count: u32,
+) -> u64 {
+    if command_buffer == 0 || dword_count < 2 || dword_count > 0x4001 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, dword_count) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(dword_count, IT_NOP, R_ZERO)) {
+        return 0;
+    }
+    for i in 1..dword_count {
+        if !write_guest_u32(cmd.wrapping_add((i as u64) * 4), 0) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbDispatch(
+    command_buffer: u64,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+    modifier: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 5) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let initiator = (modifier & 0xA038) | 0x41;
+    if !write_guest_u32(cmd, pm4_header(5, IT_DISPATCH_DIRECT, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), group_count_x) ||
+       !write_guest_u32(cmd.wrapping_add(8), group_count_y) ||
+       !write_guest_u32(cmd.wrapping_add(12), group_count_z) ||
+       !write_guest_u32(cmd.wrapping_add(16), initiator) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbSetShRegistersDirect(
+    command_buffer: u64,
+    registers: u64,
+    register_count: u32,
+) -> u64 {
+    if command_buffer == 0 || register_count == 0 || register_count > 4096 || registers == 0 {
+        return 0;
+    }
+    // Read all register pairs (offset, value) and sort by offset
+    let mut regs = Vec::with_capacity(register_count as usize);
+    for i in 0..register_count {
+        let entry = registers.wrapping_add((i as u64) * 8);
+        let offset = match read_guest_u32(entry) {
+            Some(o) => o,
+            None => return 0,
+        };
+        let value = match read_guest_u32(entry.wrapping_add(4)) {
+            Some(v) => v,
+            None => return 0,
+        };
+        regs.push((offset, value));
+    }
+    regs.sort_by_key(|r| r.0);
+
+    let mut first_cmd = 0u64;
+    let mut start = 0usize;
+    while start < regs.len() {
+        let mut end = start + 1;
+        while end < regs.len() && regs[end].0 == regs[end - 1].0 + 1 {
+            end += 1;
+        }
+        let count = (end - start) as u32;
+        let packet_dwords = count + 2;
+        let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+            Some(c) => c,
+            None => return 0,
+        };
+        if first_cmd == 0 { first_cmd = cmd; }
+        if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_SET_SH_REG, 0)) ||
+           !write_guest_u32(cmd.wrapping_add(4), regs[start].0 & 0xFFFF) {
+            return 0;
+        }
+        for j in start..end {
+            if !write_guest_u32(cmd.wrapping_add(8).wrapping_add(((j - start) as u64) * 4), regs[j].1) {
+                return 0;
+            }
+        }
+        start = end;
+    }
+    first_cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbSetShRegisterRangeDirect(
+    command_buffer: u64,
+    offset: u32,
+    values: u64,
+    value_count: u32,
+) -> u64 {
+    if command_buffer == 0 || offset == 0 || offset > 0x3FF || value_count == 0 {
+        return 0;
+    }
+    let marker = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(m) => m,
+        None => return 0,
+    };
+    if !write_guest_u32(marker, pm4_header(2, IT_NOP, R_ZERO)) ||
+       !write_guest_u32(marker.wrapping_add(4), 0x6875000D) {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, value_count + 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(value_count + 2, IT_SET_SH_REG, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), offset) {
+        return 0;
+    }
+    for i in 0..value_count {
+        let val = if values != 0 {
+            match read_guest_u32(values.wrapping_add((i as u64) * 4)) {
+                Some(v) => v,
+                None => 0,
+            }
+        } else { 0 };
+        if !write_guest_u32(cmd.wrapping_add(8).wrapping_add((i as u64) * 4), val) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbReleaseMem(
+    command_buffer: u64,
+    action: u32,
+    gcr_control: u32,
+    destination: u32,
+    cache_policy: u32,
+    dest_address: u64,
+    data_selection: u32,
+    data: u64,
+    _gds_offset: u32,
+    _gds_size: u32,
+    _interrupt: u32,
+    _interrupt_context_id: u32,
+) -> u64 {
+    if command_buffer == 0 || destination > 1 || data_selection > 3 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 8) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(8, IT_NOP, R_RELEASE_MEM)) ||
+       !write_guest_u32(cmd.wrapping_add(4), action | (cache_policy << 8)) ||
+       !write_guest_u32(cmd.wrapping_add(8), gcr_control | (data_selection << 16)) ||
+       !write_guest_u32(cmd.wrapping_add(12), dest_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(16), (dest_address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), data as u32) ||
+       !write_guest_u32(cmd.wrapping_add(24), (data >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(28), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndex(
+    command_buffer: u64,
+    index_count: u32,
+    index_address: u64,
+    modifier: u32,
+) -> u64 {
+    if command_buffer == 0 || modifier != 0x4000_0000 {
+        return 0;
+    }
+    let base_cmd = match try_allocate_command_dwords(command_buffer, 5) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(base_cmd, pm4_header(3, IT_INDEX_BASE, 0)) ||
+       !write_guest_u32(base_cmd.wrapping_add(4), index_address as u32) ||
+       !write_guest_u32(base_cmd.wrapping_add(8), (index_address >> 32) as u32) ||
+       !write_guest_u32(base_cmd.wrapping_add(12), pm4_header(2, IT_INDEX_BUFFER_SIZE, 0)) ||
+       !write_guest_u32(base_cmd.wrapping_add(16), index_count) {
+        return 0;
+    }
+    let draw_cmd = match try_allocate_command_dwords(command_buffer, 6) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(draw_cmd, pm4_header(6, IT_DRAW_INDEX_2, 0)) ||
+       !write_guest_u32(draw_cmd.wrapping_add(4), index_count) ||
+       !write_guest_u32(draw_cmd.wrapping_add(8), index_address as u32) ||
+       !write_guest_u32(draw_cmd.wrapping_add(12), (index_address >> 32) as u32) ||
+       !write_guest_u32(draw_cmd.wrapping_add(16), index_count) ||
+       !write_guest_u32(draw_cmd.wrapping_add(20), 0) {
+        return 0;
+    }
+    draw_cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexAuto(
+    command_buffer: u64,
+    index_count: u32,
+    modifier: u64,
+) -> u64 {
+    if command_buffer == 0 || modifier != 0x4000_0000 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 7) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(7, IT_NOP, R_DRAW_INDEX_AUTO)) ||
+       !write_guest_u32(cmd.wrapping_add(4), index_count) ||
+       !write_guest_u32(cmd.wrapping_add(8), 0) ||
+       !write_guest_u32(cmd.wrapping_add(12), 0) ||
+       !write_guest_u32(cmd.wrapping_add(16), 0) ||
+       !write_guest_u32(cmd.wrapping_add(20), 0) ||
+       !write_guest_u32(cmd.wrapping_add(24), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexOffset(
+    command_buffer: u64,
+    index_offset: u32,
+    index_count: u32,
+    flags: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 5) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(5, IT_DRAW_INDEX_OFFSET_2, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), index_count) ||
+       !write_guest_u32(cmd.wrapping_add(8), index_offset) ||
+       !write_guest_u32(cmd.wrapping_add(12), index_count) ||
+       !write_guest_u32(cmd.wrapping_add(16), flags & 0xE000_0001) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexSize(
+    command_buffer: u64,
+    index_size: u32,
+    cache_policy: u32,
+) -> u64 {
+    if command_buffer == 0 || cache_policy != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_INDEX_TYPE, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), index_size) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexCount(
+    command_buffer: u64,
+    index_count: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_INDEX_COUNT)) ||
+       !write_guest_u32(cmd.wrapping_add(4), index_count) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetNumInstances(
+    command_buffer: u64,
+    instance_count: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NUM_INSTANCES, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), instance_count) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetCxRegistersIndirect(
+    command_buffer: u64,
+    _address: u64,
+    _size: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_CX_REGS_INDIRECT)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetShRegistersIndirect(
+    command_buffer: u64,
+    _address: u64,
+    _size: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_SH_REGS_INDIRECT)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetUcRegistersIndirect(
+    command_buffer: u64,
+    _address: u64,
+    _size: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_UC_REGS_INDIRECT)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbWriteData(
+    command_buffer: u64,
+    destination: u32,
+    cache_policy: u32,
+    dest_address: u64,
+    data_address: u64,
+    dword_count: u32,
+    increment: u32,
+    write_confirm: u32,
+) -> u64 {
+    if command_buffer == 0 || dest_address == 0 || data_address == 0 || dword_count > 0x3FFD {
+        return 0;
+    }
+    let packet_dwords = dword_count + 4;
+    let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_NOP, R_WRITE_DATA)) ||
+       !write_guest_u32(cmd.wrapping_add(4),
+           destination | (cache_policy << 8) | (increment << 16) | (write_confirm << 24)) ||
+       !write_guest_u32(cmd.wrapping_add(8), dest_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), (dest_address >> 32) as u32) {
+        return 0;
+    }
+    for i in 0..dword_count {
+        let val = match read_guest_u32(data_address.wrapping_add((i as u64) * 4)) {
+            Some(v) => v,
+            None => return 0,
+        };
+        if !write_guest_u32(cmd.wrapping_add(16).wrapping_add((i as u64) * 4), val) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbWaitRegMem(
+    command_buffer: u64,
+    size: u32,
+    compare_function: u32,
+    operation: u32,
+    cache_policy: u32,
+    address: u64,
+    reference: u64,
+    mask: u64,
+    poll_cycles: u32,
+) -> u64 {
+    if command_buffer == 0 || size > 1 || compare_function > 7 || operation > 4 || cache_policy > 3 {
+        return 0;
+    }
+    let is_standard = operation == 2 || operation == 3;
+    let packet_dwords = if is_standard { 7 } else if size == 0 { 6 } else { 9 };
+    let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if is_standard {
+        if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_WAIT_REG_MEM, 0)) ||
+           !write_guest_u32(cmd.wrapping_add(4), compare_function | ((operation & 1) << 8)) ||
+           !write_guest_u32(cmd.wrapping_add(8), address as u32) ||
+           !write_guest_u32(cmd.wrapping_add(12), (address >> 32) as u32) ||
+           !write_guest_u32(cmd.wrapping_add(16), reference as u32) ||
+           !write_guest_u32(cmd.wrapping_add(20), mask as u32) ||
+           !write_guest_u32(cmd.wrapping_add(24), poll_cycles / 40) {
+            return 0;
+        }
+    } else {
+        let reg = if size == 0 { R_WAIT_MEM32 } else { R_WAIT_MEM64 };
+        if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_NOP, reg)) ||
+           !write_guest_u32(cmd.wrapping_add(4), address as u32) ||
+           !write_guest_u32(cmd.wrapping_add(8), (address >> 32) as u32) ||
+           !write_guest_u32(cmd.wrapping_add(12), mask as u32) {
+            return 0;
+        }
+        if size == 0 {
+            if !write_guest_u32(cmd.wrapping_add(16), compare_function | (operation << 8)) ||
+               !write_guest_u32(cmd.wrapping_add(20), reference as u32) {
+                return 0;
+            }
+        } else {
+            if !write_guest_u32(cmd.wrapping_add(16), (mask >> 32) as u32) ||
+               !write_guest_u32(cmd.wrapping_add(20), reference as u32) ||
+               !write_guest_u32(cmd.wrapping_add(24), (reference >> 32) as u32) ||
+               !write_guest_u32(cmd.wrapping_add(28), compare_function | (operation << 8)) ||
+               !write_guest_u32(cmd.wrapping_add(32), poll_cycles / 40) {
+                return 0;
+            }
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDmaData(
+    command_buffer: u64,
+    destination: u32,
+    dst_cache_policy: u32,
+    source: u32,
+    dest_address: u64,
+    src_cache_policy: u32,
+    control4: u32,
+    source_address: u64,
+    byte_count: u32,
+    control7: u32,
+    control8: u32,
+    control9: u32,
+) -> u64 {
+    if command_buffer == 0 || byte_count == 0 || (byte_count & 3) != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 8) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(8, IT_NOP, R_DMA_DATA)) ||
+       !write_guest_u32(cmd.wrapping_add(4),
+           destination | (dst_cache_policy << 8) | (source << 16) | (src_cache_policy << 24)) ||
+       !write_guest_u32(cmd.wrapping_add(8),
+           control4 | (control7 << 8) | (control8 << 16) | (control9 << 24)) ||
+       !write_guest_u32(cmd.wrapping_add(12), byte_count) ||
+       !write_guest_u32(cmd.wrapping_add(16), dest_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), (dest_address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(24), source_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(28), (source_address >> 32) as u32) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbEventWrite(
+    command_buffer: u64,
+    event_type: u32,
+    event_address: u64,
+) -> u64 {
+    if command_buffer == 0 || event_type > 0x3F || event_address != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_EVENT_WRITE, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), event_type) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbWaitUntilSafeForRendering(
+    command_buffer: u64,
+    video_out_handle: u32,
+    display_buffer_index: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 7) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(7, IT_NOP, R_WAIT_FLIP_DONE)) ||
+       !write_guest_u32(cmd.wrapping_add(4), video_out_handle) ||
+       !write_guest_u32(cmd.wrapping_add(8), display_buffer_index) ||
+       !write_guest_u32(cmd.wrapping_add(12), 0) ||
+       !write_guest_u32(cmd.wrapping_add(16), 0) ||
+       !write_guest_u32(cmd.wrapping_add(20), 0) ||
+       !write_guest_u32(cmd.wrapping_add(24), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetFlip(
+    command_buffer: u64,
+    video_out_handle: u32,
+    display_buffer_index: i32,
+    flip_mode: u32,
+    flip_arg: i64,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 6) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let flip_arg_val = flip_arg as u64;
+    if !write_guest_u32(cmd, pm4_header(6, IT_NOP, R_FLIP)) ||
+       !write_guest_u32(cmd.wrapping_add(4), video_out_handle) ||
+       !write_guest_u32(cmd.wrapping_add(8), display_buffer_index as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), flip_mode) ||
+       !write_guest_u32(cmd.wrapping_add(16), flip_arg_val as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), (flip_arg_val >> 32) as u32) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbPushMarker(
+    command_buffer: u64,
+    marker_address: u64,
+) -> u64 {
+    if command_buffer == 0 || marker_address == 0 {
+        return 0;
+    }
+    // Read string from marker_address (up to 256 chars)
+    let mut marker_bytes = [0u8; 256];
+    let mut len = 0usize;
+    for i in 0..256 {
+        if let Some(host) = crate::kernel::translate_guest_addr(marker_address.wrapping_add(i as u64)) {
+            let byte = *(host as *const u8);
+            marker_bytes[i] = byte;
+            if byte == 0 { break; }
+            len = i + 1;
+        } else { break; }
+    }
+    if len == 0 { return 0; }
+    let payload_dwords = std::cmp::max(((len as u32) + 3) / 4, 1);
+    let packet_dwords = payload_dwords + 1;
+    let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_NOP, R_PUSH_MARKER)) {
+        return 0;
+    }
+    for i in 0..payload_dwords {
+        let mut val = 0u32;
+        for byte_idx in 0..4 {
+            let src_idx = (i as usize) * 4 + byte_idx as usize;
+            if src_idx < len {
+                val |= (marker_bytes[src_idx] as u32) << (byte_idx * 8);
+            }
+        }
+        if !write_guest_u32(cmd.wrapping_add(4).wrapping_add((i as u64) * 4), val) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbPopMarker(
+    command_buffer: u64,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_POP_MARKER)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbResetQueue(
+    command_buffer: u64,
+    op: u32,
+    state: u32,
+) -> u64 {
+    if command_buffer == 0 || op != 0x3FF || state != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_DRAW_RESET)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbAcquireMem(
+    command_buffer: u64,
+    engine: u32,
+    cb_db_op: u32,
+    gcr_control: u32,
+    base_address: u64,
+    size_bytes: u64,
+    poll_cycles: u32,
+) -> u64 {
+    let no_size = size_bytes == u64::MAX;
+    if command_buffer == 0 || engine > 1 ||
+       (!no_size && (size_bytes & 0xFF) != 0) ||
+       (!no_size && (size_bytes >> 40) != 0) ||
+       (base_address & 0xFF) != 0 ||
+       (base_address >> 40) != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 8) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(8, IT_NOP, R_ACQUIRE_MEM)) ||
+       !write_guest_u32(cmd.wrapping_add(4), (engine << 31) | cb_db_op) ||
+       !write_guest_u32(cmd.wrapping_add(8), if no_size { 0 } else { (size_bytes >> 8) as u32 }) ||
+       !write_guest_u32(cmd.wrapping_add(12), 0) ||
+       !write_guest_u32(cmd.wrapping_add(16), (base_address >> 8) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), 0) ||
+       !write_guest_u32(cmd.wrapping_add(24), poll_cycles / 40) ||
+       !write_guest_u32(cmd.wrapping_add(28), gcr_control) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexBuffer(
+    command_buffer: u64,
+    index_buffer_address: u64,
+    index_count: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 5) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(3, IT_INDEX_BASE, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), index_buffer_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(8), (index_buffer_address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), pm4_header(2, IT_INDEX_BUFFER_SIZE, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(16), index_count) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDispatchIndirect(
+    command_buffer: u64,
+    data_offset: u32,
+    modifier: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 3) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(3, IT_DISPATCH_INDIRECT, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), data_offset) ||
+       !write_guest_u32(cmd.wrapping_add(8), (modifier & 0xA038) | 0x41) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetBaseIndirectArgs(
+    command_buffer: u64,
+    base_index: u32,
+    address: u64,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 4) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(4, IT_SET_BASE, 0) | (base_index << 1)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 1) ||
+       !write_guest_u32(cmd.wrapping_add(8), address as u32 & !7u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), (address >> 32) as u32) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbStallCommandBufferParser(
+    command_buffer: u64,
+    _size: u32,
+    _address: u64,
+    _reference: u64,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_ZERO)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+/// =========================================================================
+/// ACB (Async Compute Buffer) Functions
+/// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbResetQueue(
+    command_buffer: u64,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_ACB_RESET)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbEventWrite(
+    command_buffer: u64,
+    event_type: u32,
+    event_address: u64,
+) -> u64 {
+    if command_buffer == 0 || (event_type & 0xFF) >= 0x40 {
+        return 0;
+    }
+    let event_type_byte = event_type & 0xFF;
+    let has_address = (event_type_byte & !1u32) == 0x38;
+    let packet_dwords = if has_address { 4 } else { 2 };
+    let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_EVENT_WRITE, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4),
+           if has_address { event_type_byte | 0x100 } else { event_type_byte & 0x3F }) {
+        return 0;
+    }
+    if has_address {
+        if !write_guest_u32(cmd.wrapping_add(8), (event_address as u32) & !7u32) ||
+           !write_guest_u32(cmd.wrapping_add(12), (event_address >> 32) as u32) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbAcquireMem(
+    command_buffer: u64,
+    gcr_control: u32,
+    base_address: u64,
+    size_bytes: u64,
+    poll_cycles: u32,
+) -> u64 {
+    let no_size = size_bytes == u64::MAX;
+    if command_buffer == 0 ||
+       (!no_size && (size_bytes & 0xFF) != 0) ||
+       (!no_size && (size_bytes >> 40) != 0) ||
+       (base_address & 0xFF) != 0 ||
+       (base_address >> 40) != 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 8) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(8, IT_NOP, R_ACQUIRE_MEM)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0x8000_0000) ||
+       !write_guest_u32(cmd.wrapping_add(8), if no_size { 0 } else { (size_bytes >> 8) as u32 }) ||
+       !write_guest_u32(cmd.wrapping_add(12), 0) ||
+       !write_guest_u32(cmd.wrapping_add(16), (base_address >> 8) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), 0) ||
+       !write_guest_u32(cmd.wrapping_add(24), poll_cycles / 40) ||
+       !write_guest_u32(cmd.wrapping_add(28), gcr_control) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbWaitRegMem(
+    command_buffer: u64,
+    size: u32,
+    compare_function: u32,
+    cache_policy: u32,
+    address: u64,
+    reference: u64,
+    mask: u64,
+    poll_cycles: u32,
+) -> u64 {
+    if command_buffer == 0 || size > 1 || compare_function > 7 || cache_policy > 3 {
+        return 0;
+    }
+    let packet_dwords = if size == 0 { 6 } else { 9 };
+    let reg = if size == 0 { R_WAIT_MEM32 } else { R_WAIT_MEM64 };
+    let cmd = match try_allocate_command_dwords(command_buffer, packet_dwords) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(packet_dwords, IT_NOP, reg)) ||
+       !write_guest_u32(cmd.wrapping_add(4), address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(8), (address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), mask as u32) {
+        return 0;
+    }
+    if size == 0 {
+        if !write_guest_u32(cmd.wrapping_add(16), compare_function) ||
+           !write_guest_u32(cmd.wrapping_add(20), reference as u32) {
+            return 0;
+        }
+    } else {
+        if !write_guest_u32(cmd.wrapping_add(16), (mask >> 32) as u32) ||
+           !write_guest_u32(cmd.wrapping_add(20), reference as u32) ||
+           !write_guest_u32(cmd.wrapping_add(24), (reference >> 32) as u32) ||
+           !write_guest_u32(cmd.wrapping_add(28), compare_function) ||
+           !write_guest_u32(cmd.wrapping_add(32), poll_cycles / 40) {
+            return 0;
+        }
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbWriteData(
+    command_buffer: u64,
+    _arg1: u64,
+    _arg2: u64,
+    _arg3: u64,
+    _arg4: u64,
+    _arg5: u64,
+) -> u64 {
+    // Delegate to DcbWriteData variant
+    if command_buffer == 0 { return 0; }
+    let cmd = match try_allocate_command_dwords(command_buffer, 2) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(2, IT_NOP, R_WRITE_DATA)) ||
+       !write_guest_u32(cmd.wrapping_add(4), 0) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbDispatchIndirect(
+    command_buffer: u64,
+    arguments_address: u64,
+    modifier: u32,
+) -> u64 {
+    if command_buffer == 0 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 4) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(4, IT_DISPATCH_INDIRECT, 0)) ||
+       !write_guest_u32(cmd.wrapping_add(4), arguments_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(8), (arguments_address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), (modifier & 0xA038) | 0x41) {
+        return 0;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbDmaData(
+    command_buffer: u64,
+    source_selector: u32,
+    destination_selector: u32,
+    destination_address: u64,
+    source_or_immediate: u64,
+    byte_count: u32,
+) -> u64 {
+    if command_buffer == 0 || byte_count == 0 || byte_count > 256u32 * 1024u32 * 1024u32 {
+        return 0;
+    }
+    let cmd = match try_allocate_command_dwords(command_buffer, 7) {
+        Some(c) => c,
+        None => return 0,
+    };
+    if !write_guest_u32(cmd, pm4_header(7, IT_NOP, R_DMA_DATA)) ||
+       !write_guest_u32(cmd.wrapping_add(4), destination_address as u32) ||
+       !write_guest_u32(cmd.wrapping_add(8), (destination_address >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(12), source_or_immediate as u32) ||
+       !write_guest_u32(cmd.wrapping_add(16), (source_or_immediate >> 32) as u32) ||
+       !write_guest_u32(cmd.wrapping_add(20), byte_count) ||
+       !write_guest_u32(cmd.wrapping_add(24), source_selector | (destination_selector << 8)) {
+        return 0;
+    }
+    cmd
+}
+
+/// =========================================================================
+/// Patch Functions
+/// =========================================================================
+
+unsafe fn read_packet_header(addr: u64) -> Option<(u32, u32, u32)> {
+    let header = read_guest_u32(addr)?;
+    let packet_type = header >> 30;
+    if packet_type != 3 { return None; }
+    let length = ((header >> 16) & 0x3FFF) + 2;
+    let op = (header >> 8) & 0xFF;
+    let reg = header & 0x3F;
+    Some((op, reg, length))
+}
+
+unsafe fn patch_uint32_bits(addr: u64, mask: u32, value: u32) -> bool {
+    if let Some(current) = read_guest_u32(addr) {
+        write_guest_u32(addr, (current & !mask) | (value & mask))
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcSetCxRegIndirectPatchSetAddress(
+    command_address: u64,
+    _address: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcSetShRegIndirectPatchSetAddress(
+    command_address: u64,
+    _address: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcSetUcRegIndirectPatchSetAddress(
+    command_address: u64,
+    _address: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDmaDataPatchSetDstAddressOrOffset(
+    command_address: u64,
+    destination_address: u64,
+) -> i32 {
+    if let Some((op, reg, length)) = read_packet_header(command_address) {
+        if op == IT_NOP && reg == R_DMA_DATA {
+            let dst_offset = if length == 7 { 4 } else { 16 };
+            if write_guest_u64(command_address.wrapping_add(dst_offset as u64), destination_address) {
+                return 0;
+            }
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(
+    command_address: u64,
+    source_value: u64,
+) -> i32 {
+    if let Some((op, reg, length)) = read_packet_header(command_address) {
+        if op == IT_NOP && reg == R_DMA_DATA {
+            let src_offset = if length == 7 { 12 } else { 24 };
+            if write_guest_u64(command_address.wrapping_add(src_offset as u64), source_value) {
+                return 0;
+            }
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWriteDataPatchSetCachePolicy(
+    command_address: u64,
+    _value: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWriteDataPatchSetDst(
+    command_address: u64,
+    _value: u32,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWriteDataPatchSetAddressOrOffset(
+    command_address: u64,
+    _value: u64,
+) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWaitRegMemPatchAddress(
+    command_address: u64,
+    address: u64,
+) -> i32 {
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        let field_offset = if op == IT_WAIT_REG_MEM {
+            8
+        } else if op == IT_NOP && (reg == R_WAIT_MEM32 || reg == R_WAIT_MEM64) {
+            4
+        } else { 0 };
+        if field_offset != 0 {
+            if write_guest_u64(command_address.wrapping_add(field_offset), address) {
+                return 0;
+            }
+            return -1972633590;
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWaitRegMemPatchCompareFunction(
+    command_address: u64,
+    compare_function: u32,
+) -> i32 {
+    if compare_function > 7 { return -1972633590; }
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        let field_offset = if op == IT_WAIT_REG_MEM {
+            4
+        } else if op == IT_NOP && reg == R_WAIT_MEM32 {
+            16
+        } else if op == IT_NOP && reg == R_WAIT_MEM64 {
+            28
+        } else { 0 };
+        if field_offset != 0 && patch_uint32_bits(command_address.wrapping_add(field_offset), 0x7, compare_function) {
+            return 0;
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWaitRegMemPatchReference(
+    command_address: u64,
+    reference: u64,
+) -> i32 {
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        let wrote = if op == IT_WAIT_REG_MEM {
+            write_guest_u32(command_address.wrapping_add(16), reference as u32)
+        } else if op == IT_NOP && reg == R_WAIT_MEM32 {
+            write_guest_u32(command_address.wrapping_add(20), reference as u32)
+        } else if op == IT_NOP && reg == R_WAIT_MEM64 {
+            write_guest_u64(command_address.wrapping_add(20), reference)
+        } else { false };
+        if wrote { return 0; }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcWaitRegMemPatchMask(
+    command_address: u64,
+    mask: u64,
+) -> i32 {
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        let wrote = if op == IT_WAIT_REG_MEM {
+            write_guest_u32(command_address.wrapping_add(20), mask as u32)
+        } else if op == IT_NOP && reg == R_WAIT_MEM32 {
+            write_guest_u32(command_address.wrapping_add(12), mask as u32)
+        } else if op == IT_NOP && reg == R_WAIT_MEM64 {
+            write_guest_u64(command_address.wrapping_add(12), mask)
+        } else { false };
+        if wrote { return 0; }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcQueueEndOfPipeActionPatchAddress(
+    command_address: u64,
+    address: u64,
+) -> i32 {
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        if op == IT_NOP && reg == R_RELEASE_MEM {
+            if write_guest_u64(command_address.wrapping_add(12), address) {
+                return 0;
+            }
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcQueueEndOfPipeActionPatchGcrCntl(
+    command_address: u64,
+    gcr_control: u32,
+) -> i32 {
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        if op == IT_NOP && reg == R_RELEASE_MEM {
+            if patch_uint32_bits(command_address.wrapping_add(8), 0xFFFF, gcr_control) {
+                return 0;
+            }
+        }
+    }
+    -1972633590
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcQueueEndOfPipeActionPatchType(
+    command_address: u64,
+    data_selection: u32,
+) -> i32 {
+    if data_selection > 3 { return -1972633590; }
+    if let Some((op, reg, _)) = read_packet_header(command_address) {
+        if op == IT_NOP && reg == R_RELEASE_MEM {
+            if patch_uint32_bits(command_address.wrapping_add(8), 0x00FF_0000, data_selection << 16) {
+                return 0;
+            }
+        }
+    }
+    -1972633590
+}
+
+/// =========================================================================
+/// GetSize Functions (return constant sizes in dwords)
+/// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbDispatchGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbNopGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexGetSize() -> i32 {
+    11 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexAutoGetSize() -> i32 {
+    7 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexIndirectGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexOffsetGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexCountGetSize() -> i32 {
+    7 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDmaDataGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbGetLodStatsGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetShRegisterDirectGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbWriteDataGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbStallCommandBufferParserGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetUcRegisterDirectGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbDmaDataGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbEventWriteGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbAcquireMemGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbAcquireMemGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbSetShRegistersDirectGetSize() -> i32 {
+    0xC8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetCxRegistersIndirectGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetShRegistersIndirectGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexIndirectMultiGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndirectGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDispatchIndirectGetSize() -> i32 {
+    3 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexBufferGetSize() -> i32 {
+    5 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbEndOcclusionQueryGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetBoolPredicationEnableGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetPredicationDisableGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbDrawIndexMultiInstancedGetSize() -> i32 {
+    11 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbSetUcRegisterRangeDirectGetSize() -> i32 {
+    0xC8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbSetUcRegistersDirectGetSize() -> i32 {
+    0xC8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCbQueueEndOfPipeActionGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbEventWriteGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbWaitOnAddressGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbWaitOnAddressGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbAtomicMemGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbCopyDataGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbCopyDataGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbAtomicMemGetSize() -> i32 {
+    8 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbCondExecGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbPrimeUtcl2GetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbContextStateOpGetSize() -> i32 {
+    2 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbJumpGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetIndexIndirectArgsGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetBaseDrawIndirectArgsGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDcbSetBaseDispatchIndirectArgsGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbJumpGetSize() -> i32 {
+    4 * 4
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcAcbQueueEndOfShaderActionGetSize() -> i32 {
+    8 * 4
+}
+
+/// =========================================================================
+/// Other AGC Functions
+/// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcGetGsOversubscription() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcGetDataPacketPayloadAddress(
+    output_address: u64,
+    command_address: u64,
+    type_: i32,
+) -> i32 {
+    if output_address == 0 || command_address == 0 {
+        return -1972633590;
+    }
+    let mut payload_address = command_address.wrapping_add(8);
+    if type_ == 0 {
+        if let Some(header) = read_guest_u32(command_address) {
+            if (header & 0x3FFF_0000) == 0x3FFF_0000 {
+                payload_address = 0;
+            } else {
+                payload_address = command_address.wrapping_add(4);
+            }
+        }
+    }
+    write_guest_u64(output_address, payload_address);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSubmitDcb(
+    arg0: u64,
+    dcb_gpu_addr: u64,
+    dcb_size_in_dwords: u64,
+    _arg3: u64,
+    _arg4: u64,
+    _arg5: u64,
+) -> i32 {
+    info!(
+        "API Driver Intercepted: sceAgcDriverSubmitDcb | Context: 0x{:X} | PacketAddress: 0x{:X} | Size: {} DWORDs",
+        arg0, dcb_gpu_addr, dcb_size_in_dwords
+    );
+    if dcb_gpu_addr != 0 && dcb_size_in_dwords > 0 {
+        decode_pm4_command_buffer(dcb_gpu_addr, dcb_size_in_dwords as u32);
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcDriverSubmitAcb(
+    owner_handle: u32,
+    packet_address: u64,
+) -> i32 {
+    info!("API: sceAgcDriverSubmitAcb | owner={} packet=0x{:X}", owner_handle, packet_address);
+    if packet_address != 0 {
+        if let Some(cmd_addr) = read_guest_u64(packet_address) {
+            if let Some(dword_count) = read_guest_u32(packet_address.wrapping_add(8)) {
+                if cmd_addr != 0 && dword_count > 0 {
+                    decode_pm4_command_buffer(cmd_addr, dword_count);
+                }
+            }
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcInit(
+    state_address: u64,
+    version: u32,
+) -> i32 {
+    info!("API: sceAgcInit | state=0x{:X} version={}", state_address, version);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCreatePrimState(
+    cx_registers: u64,
+    uc_registers: u64,
+    hull_shader: u64,
+    geometry_shader: u64,
+    primitive_type: u32,
+) -> i32 {
+    info!("API: sceAgcCreatePrimState | cx=0x{:X} uc=0x{:X} hs=0x{:X} gs=0x{:X} prim=0x{:X}",
+        cx_registers, uc_registers, hull_shader, geometry_shader, primitive_type);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "sysv64" fn sceAgcCreateInterpolantMapping(
+    registers_address: u64,
+    geometry_shader: u64,
+    pixel_shader: u64,
+) -> i32 {
+    info!("API: sceAgcCreateInterpolantMapping | regs=0x{:X} gs=0x{:X} ps=0x{:X}",
+        registers_address, geometry_shader, pixel_shader);
     0
 }
 
@@ -3107,7 +5163,7 @@ mod graphics_tests {
 
         // PM4 packet stream:
         // 1. OP_SET_SH_REG (0x2C) to set compute shader address (0x100E/0x100F) to 0x1122334455667788
-        // 2. OP_SET_CONTEXT_REG (0x28) to set vertex shader address (0x1000/0x1001) to 0x99AABBCCDDEEFF00
+        // 2. OP_SET_CONTEXT_REG (0x69) to set vertex shader address (0x1000/0x1001) to 0x99AABBCCDDEEFF00
         let pm4_stream: Vec<u32> = vec![
             // OP_SET_SH_REG: 2 registers starting at 0x100E
             (3 << 30) | (2 << 16) | (0x2C << 8),
@@ -3115,9 +5171,8 @@ mod graphics_tests {
             0x55667788,
             0x11223344,
 
-            // OP_SET_CONTEXT_REG (0x28): 2 registers starting at 0x1000.
-            // Note: Second word is 0x1000, which is not 0x66666666, so it's treated as context register update!
-            (3 << 30) | (2 << 16) | (0x28 << 8),
+            // OP_SET_CONTEXT_REG (0x69): 2 registers starting at 0x1000.
+            (3 << 30) | (2 << 16) | (0x69 << 8),
             0x1000,
             0xDDEEFF00,
             0x99AABBCC,

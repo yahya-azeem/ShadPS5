@@ -15,8 +15,8 @@ The compatibility layer operates by virtualizing the CPU execution environment a
 +--------------------------------------------------------+
 |             PS5 Executable (.elf / .self)              |
 +--------------------------------------------------------+
-                           |
-                           v
+                            |
+                            v
 +--------------------------------------------------------+
 |           ShadPS5 ELF Loader & Linker Subsystem         |
 |  - Maps program segments                               |
@@ -35,6 +35,12 @@ The compatibility layer operates by virtualizing the CPU execution environment a
 |      Host OS (Win32/Linux)    |      |         Vulkan 1.3 / GPU        |
 +-------------------------------+      +---------------------------------+
 ```
+
+### Rendering Status
+
+HLE PM4 → Vulkan translation working: guest vertex buffer sample renders a red triangle via compiled SPIR-V shaders.
+
+![Triangle rendering sample](triangle_screenshot.png)
 
 ### 1. Loader & Linker (`src/loader.rs`)
 - Parses program headers of guest `.elf` or decrypted `.self` files.

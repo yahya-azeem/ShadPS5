@@ -157,6 +157,7 @@ fn main() {
         ("-hJRce8wn1U", "_ZN3sce4Json12MemAllocatorC2Ev"),
         ("L-Q3LEjIbgA", "sceKernelMapDirectMemory"),
         ("eLdDw6l0-bU", "unresolved"),
+        ("2JtWUUiYBXs", "sceAgcGetRegisterDefaults2"),
     ];
 
     for &(b64, expected) in &test_nids {

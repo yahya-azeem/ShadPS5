@@ -894,11 +894,11 @@ pub unsafe extern "sysv64" fn hle_pthread_create(
         
         crate::hle_symbols::GUEST_FS.with(|fs| fs.set(guest_tcb_addr));
         
+        info!("  [Host Thread {}] Executing pthread entry point with guest FS...", new_tid);
         unsafe {
             libc::syscall(libc::SYS_arch_prctl, 0x1002, guest_tcb_addr); // ARCH_SET_FS
         }
         
-        info!("  [Host Thread {}] Executing pthread entry point with guest FS...", new_tid);
         unsafe {
             entry_fn(arg);
         }

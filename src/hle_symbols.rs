@@ -112,10 +112,153 @@ pub fn lookup_hle_address(name: &str) -> Option<u64> {
         "sceUserServiceInitialize" => Some(crate::user_service::sceUserServiceInitialize as u64),
         "sceUserServiceGetLoginUserIdList" => Some(crate::user_service::sceUserServiceGetLoginUserIdList as u64),
         "sceUserServiceGetUserName" => Some(crate::user_service::sceUserServiceGetUserName as u64),
+        "sceUserServiceGetEvent" => Some(crate::user_service::sceUserServiceGetEvent as u64),
         "sceUserServiceTerminate" => Some(crate::user_service::sceUserServiceTerminate as u64),
         
         "sceAgcSubmitGraphics" => Some(crate::graphics::sceAgcSubmitGraphics as u64),
         "sceAgcSubmitAsyncCompute" => Some(crate::graphics::sceAgcSubmitAsyncCompute as u64),
+        "sceAgcGetRegisterDefaults2" => Some(crate::graphics::sceAgcGetRegisterDefaults2 as u64),
+        "sceAgcGetRegisterDefaults2Internal" => Some(crate::graphics::sceAgcGetRegisterDefaults2Internal as u64),
+        "sceAgcCreateShader" => Some(crate::graphics::sceAgcCreateShader as u64),
+        "sceAgcAcbAcquireMem" => Some(crate::graphics::sceAgcAcbAcquireMem as u64),
+        "sceAgcAcbAcquireMemGetSize" => Some(crate::graphics::sceAgcAcbAcquireMemGetSize as u64),
+        "sceAgcAcbAtomicMemGetSize" => Some(crate::graphics::sceAgcAcbAtomicMemGetSize as u64),
+        "sceAgcAcbCondExecGetSize" => Some(crate::graphics::sceAgcAcbCondExecGetSize as u64),
+        "sceAgcAcbCopyDataGetSize" => Some(crate::graphics::sceAgcAcbCopyDataGetSize as u64),
+        "sceAgcAcbDispatchIndirect" => Some(crate::graphics::sceAgcAcbDispatchIndirect as u64),
+        "sceAgcAcbDmaData" => Some(crate::graphics::sceAgcAcbDmaData as u64),
+        "sceAgcAcbDmaDataGetSize" => Some(crate::graphics::sceAgcAcbDmaDataGetSize as u64),
+        "sceAgcAcbEventWrite" => Some(crate::graphics::sceAgcAcbEventWrite as u64),
+        "sceAgcAcbEventWriteGetSize" => Some(crate::graphics::sceAgcAcbEventWriteGetSize as u64),
+        "sceAgcAcbJumpGetSize" => Some(crate::graphics::sceAgcAcbJumpGetSize as u64),
+        "sceAgcAcbPrimeUtcl2GetSize" => Some(crate::graphics::sceAgcAcbPrimeUtcl2GetSize as u64),
+        "sceAgcAcbQueueEndOfShaderActionGetSize" => Some(crate::graphics::sceAgcAcbQueueEndOfShaderActionGetSize as u64),
+        "sceAgcAcbResetQueue" => Some(crate::graphics::sceAgcAcbResetQueue as u64),
+        "sceAgcAcbWaitOnAddressGetSize" => Some(crate::graphics::sceAgcAcbWaitOnAddressGetSize as u64),
+        "sceAgcAcbWaitRegMem" => Some(crate::graphics::sceAgcAcbWaitRegMem as u64),
+        "sceAgcAcbWriteData" => Some(crate::graphics::sceAgcAcbWriteData as u64),
+        "sceAgcCbDispatch" => Some(crate::graphics::sceAgcCbDispatch as u64),
+        "sceAgcCbDispatchGetSize" => Some(crate::graphics::sceAgcCbDispatchGetSize as u64),
+        "sceAgcCbNop" => Some(crate::graphics::sceAgcCbNop as u64),
+        "sceAgcCbNopGetSize" => Some(crate::graphics::sceAgcCbNopGetSize as u64),
+        "sceAgcCbQueueEndOfPipeActionGetSize" => Some(crate::graphics::sceAgcCbQueueEndOfPipeActionGetSize as u64),
+        "sceAgcCbReleaseMem" => Some(crate::graphics::sceAgcCbReleaseMem as u64),
+        "sceAgcCbSetShRegisterRangeDirect" => Some(crate::graphics::sceAgcCbSetShRegisterRangeDirect as u64),
+        "sceAgcCbSetShRegistersDirect" => Some(crate::graphics::sceAgcCbSetShRegistersDirect as u64),
+        "sceAgcCbSetShRegistersDirectGetSize" => Some(crate::graphics::sceAgcCbSetShRegistersDirectGetSize as u64),
+        "sceAgcCbSetUcRegisterRangeDirectGetSize" => Some(crate::graphics::sceAgcCbSetUcRegisterRangeDirectGetSize as u64),
+        "sceAgcCbSetUcRegistersDirectGetSize" => Some(crate::graphics::sceAgcCbSetUcRegistersDirectGetSize as u64),
+        "sceAgcCreateInterpolantMapping" => Some(crate::graphics::sceAgcCreateInterpolantMapping as u64),
+        "sceAgcCreatePrimState" => Some(crate::graphics::sceAgcCreatePrimState as u64),
+        "sceAgcDcbAcquireMem" => Some(crate::graphics::sceAgcDcbAcquireMem as u64),
+        "sceAgcDcbAcquireMemGetSize" => Some(crate::graphics::sceAgcDcbAcquireMemGetSize as u64),
+        "sceAgcDcbAtomicMemGetSize" => Some(crate::graphics::sceAgcDcbAtomicMemGetSize as u64),
+        "sceAgcDcbContextStateOpGetSize" => Some(crate::graphics::sceAgcDcbContextStateOpGetSize as u64),
+        "sceAgcDcbCopyDataGetSize" => Some(crate::graphics::sceAgcDcbCopyDataGetSize as u64),
+        "sceAgcDcbDispatchIndirect" => Some(crate::graphics::sceAgcDcbDispatchIndirect as u64),
+        "sceAgcDcbDispatchIndirectGetSize" => Some(crate::graphics::sceAgcDcbDispatchIndirectGetSize as u64),
+        "sceAgcDcbDmaData" => Some(crate::graphics::sceAgcDcbDmaData as u64),
+        "sceAgcDcbDmaDataGetSize" => Some(crate::graphics::sceAgcDcbDmaDataGetSize as u64),
+        "sceAgcDcbDrawIndex" => Some(crate::graphics::sceAgcDcbDrawIndex as u64),
+        "sceAgcDcbDrawIndexAuto" => Some(crate::graphics::sceAgcDcbDrawIndexAuto as u64),
+        "sceAgcDcbDrawIndexAutoGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexAutoGetSize as u64),
+        "sceAgcDcbDrawIndexGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexGetSize as u64),
+        "sceAgcDcbDrawIndexIndirectGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexIndirectGetSize as u64),
+        "sceAgcDcbDrawIndexIndirectMultiGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexIndirectMultiGetSize as u64),
+        "sceAgcDcbDrawIndexMultiInstancedGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexMultiInstancedGetSize as u64),
+        "sceAgcDcbDrawIndexOffset" => Some(crate::graphics::sceAgcDcbDrawIndexOffset as u64),
+        "sceAgcDcbDrawIndexOffsetGetSize" => Some(crate::graphics::sceAgcDcbDrawIndexOffsetGetSize as u64),
+        "sceAgcDcbDrawIndirectGetSize" => Some(crate::graphics::sceAgcDcbDrawIndirectGetSize as u64),
+        "sceAgcDcbEndOcclusionQueryGetSize" => Some(crate::graphics::sceAgcDcbEndOcclusionQueryGetSize as u64),
+        "sceAgcDcbEventWrite" => Some(crate::graphics::sceAgcDcbEventWrite as u64),
+        "sceAgcDcbEventWriteGetSize" => Some(crate::graphics::sceAgcDcbEventWriteGetSize as u64),
+        "sceAgcDcbGetLodStatsGetSize" => Some(crate::graphics::sceAgcDcbGetLodStatsGetSize as u64),
+        "sceAgcDcbJumpGetSize" => Some(crate::graphics::sceAgcDcbJumpGetSize as u64),
+        "sceAgcDcbPopMarker" => Some(crate::graphics::sceAgcDcbPopMarker as u64),
+        "sceAgcDcbPushMarker" => Some(crate::graphics::sceAgcDcbPushMarker as u64),
+        "sceAgcDcbResetQueue" => Some(crate::graphics::sceAgcDcbResetQueue as u64),
+        "sceAgcDcbSetBaseDispatchIndirectArgsGetSize" => Some(crate::graphics::sceAgcDcbSetBaseDispatchIndirectArgsGetSize as u64),
+        "sceAgcDcbSetBaseDrawIndirectArgsGetSize" => Some(crate::graphics::sceAgcDcbSetBaseDrawIndirectArgsGetSize as u64),
+        "sceAgcDcbSetBaseIndirectArgs" => Some(crate::graphics::sceAgcDcbSetBaseIndirectArgs as u64),
+        "sceAgcDcbSetBoolPredicationEnableGetSize" => Some(crate::graphics::sceAgcDcbSetBoolPredicationEnableGetSize as u64),
+        "sceAgcDcbSetCxRegistersIndirect" => Some(crate::graphics::sceAgcDcbSetCxRegistersIndirect as u64),
+        "sceAgcDcbSetCxRegistersIndirectGetSize" => Some(crate::graphics::sceAgcDcbSetCxRegistersIndirectGetSize as u64),
+        "sceAgcDcbSetFlip" => Some(crate::graphics::sceAgcDcbSetFlip as u64),
+        "sceAgcDcbSetIndexBuffer" => Some(crate::graphics::sceAgcDcbSetIndexBuffer as u64),
+        "sceAgcDcbSetIndexBufferGetSize" => Some(crate::graphics::sceAgcDcbSetIndexBufferGetSize as u64),
+        "sceAgcDcbSetIndexCount" => Some(crate::graphics::sceAgcDcbSetIndexCount as u64),
+        "sceAgcDcbSetIndexCountGetSize" => Some(crate::graphics::sceAgcDcbSetIndexCountGetSize as u64),
+        "sceAgcDcbSetIndexIndirectArgsGetSize" => Some(crate::graphics::sceAgcDcbSetIndexIndirectArgsGetSize as u64),
+        "sceAgcDcbSetIndexSize" => Some(crate::graphics::sceAgcDcbSetIndexSize as u64),
+        "sceAgcDcbSetNumInstances" => Some(crate::graphics::sceAgcDcbSetNumInstances as u64),
+        "sceAgcDcbSetPredicationDisableGetSize" => Some(crate::graphics::sceAgcDcbSetPredicationDisableGetSize as u64),
+        "sceAgcDcbSetShRegisterDirectGetSize" => Some(crate::graphics::sceAgcDcbSetShRegisterDirectGetSize as u64),
+        "sceAgcDcbSetShRegistersIndirect" => Some(crate::graphics::sceAgcDcbSetShRegistersIndirect as u64),
+        "sceAgcDcbSetShRegistersIndirectGetSize" => Some(crate::graphics::sceAgcDcbSetShRegistersIndirectGetSize as u64),
+        "sceAgcDcbSetUcRegisterDirectGetSize" => Some(crate::graphics::sceAgcDcbSetUcRegisterDirectGetSize as u64),
+        "sceAgcDcbSetUcRegistersIndirect" => Some(crate::graphics::sceAgcDcbSetUcRegistersIndirect as u64),
+        "sceAgcDcbStallCommandBufferParser" => Some(crate::graphics::sceAgcDcbStallCommandBufferParser as u64),
+        "sceAgcDcbStallCommandBufferParserGetSize" => Some(crate::graphics::sceAgcDcbStallCommandBufferParserGetSize as u64),
+        "sceAgcDcbWaitOnAddressGetSize" => Some(crate::graphics::sceAgcDcbWaitOnAddressGetSize as u64),
+        "sceAgcDcbWaitRegMem" => Some(crate::graphics::sceAgcDcbWaitRegMem as u64),
+        "sceAgcDcbWaitUntilSafeForRendering" => Some(crate::graphics::sceAgcDcbWaitUntilSafeForRendering as u64),
+        "sceAgcDcbWriteData" => Some(crate::graphics::sceAgcDcbWriteData as u64),
+        "sceAgcDcbWriteDataGetSize" => Some(crate::graphics::sceAgcDcbWriteDataGetSize as u64),
+        "sceAgcDmaDataPatchSetDstAddressOrOffset" => Some(crate::graphics::sceAgcDmaDataPatchSetDstAddressOrOffset as u64),
+        "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => Some(crate::graphics::sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate as u64),
+        "sceAgcDriverAddEqEvent" => Some(crate::graphics::sceAgcDriverAddEqEvent as u64),
+        "sceAgcDriverDeleteEqEvent" => Some(crate::graphics::sceAgcDriverDeleteEqEvent as u64),
+        "sceAgcDriverGetDefaultOwner" => Some(crate::graphics::sceAgcDriverGetDefaultOwner as u64),
+        "sceAgcDriverGetEqContextId" => Some(crate::graphics::sceAgcDriverGetEqContextId as u64),
+        "sceAgcDriverGetEqEventType" => Some(crate::graphics::sceAgcDriverGetEqEventType as u64),
+        "sceAgcDriverGetOwnerName" => Some(crate::graphics::sceAgcDriverGetOwnerName as u64),
+        "sceAgcDriverGetResourceBaseAddressAndSizeInBytes" => Some(crate::graphics::sceAgcDriverGetResourceBaseAddressAndSizeInBytes as u64),
+        "sceAgcDriverGetResourceName" => Some(crate::graphics::sceAgcDriverGetResourceName as u64),
+        "sceAgcDriverGetResourceRegistrationMaxNameLength" => Some(crate::graphics::sceAgcDriverGetResourceRegistrationMaxNameLength as u64),
+        "sceAgcDriverGetResourceShaderGuid" => Some(crate::graphics::sceAgcDriverGetResourceShaderGuid as u64),
+        "sceAgcDriverGetResourceType" => Some(crate::graphics::sceAgcDriverGetResourceType as u64),
+        "sceAgcDriverGetResourceUserData" => Some(crate::graphics::sceAgcDriverGetResourceUserData as u64),
+        "sceAgcDriverGetShaderDebuggingStatus" => Some(crate::graphics::sceAgcDriverGetShaderDebuggingStatus as u64),
+        "sceAgcDriverInitResourceRegistration" => Some(crate::graphics::sceAgcDriverInitResourceRegistration as u64),
+        "sceAgcDriverIsCaptureInProgress" => Some(crate::graphics::sceAgcDriverIsCaptureInProgress as u64),
+        "sceAgcDriverIsSubmitValidationEnabled" => Some(crate::graphics::sceAgcDriverIsSubmitValidationEnabled as u64),
+        "sceAgcDriverIsTraceInProgress" => Some(crate::graphics::sceAgcDriverIsTraceInProgress as u64),
+        "sceAgcDriverQueryResourceRegistrationUserMemoryRequirements" => Some(crate::graphics::sceAgcDriverQueryResourceRegistrationUserMemoryRequirements as u64),
+        "sceAgcDriverRegisterDefaultOwner" => Some(crate::graphics::sceAgcDriverRegisterDefaultOwner as u64),
+        "sceAgcDriverRegisterGdsResource" => Some(crate::graphics::sceAgcDriverRegisterGdsResource as u64),
+        "sceAgcDriverRegisterOwner" => Some(crate::graphics::sceAgcDriverRegisterOwner as u64),
+        "sceAgcDriverRegisterResource" => Some(crate::graphics::sceAgcDriverRegisterResource as u64),
+        "sceAgcDriverRegisterWorkloadStream" => Some(crate::graphics::sceAgcDriverRegisterWorkloadStream as u64),
+        "sceAgcDriverRequestCaptureStart" => Some(crate::graphics::sceAgcDriverRequestCaptureStart as u64),
+        "sceAgcDriverRequestCaptureStop" => Some(crate::graphics::sceAgcDriverRequestCaptureStop as u64),
+        "sceAgcDriverSetResourceUserData" => Some(crate::graphics::sceAgcDriverSetResourceUserData as u64),
+        "sceAgcDriverSetValidationErrorOutputFrequency" => Some(crate::graphics::sceAgcDriverSetValidationErrorOutputFrequency as u64),
+        "sceAgcDriverSubmitAcb" => Some(crate::graphics::sceAgcDriverSubmitAcb as u64),
+        "sceAgcDriverSubmitDcb" => Some(crate::graphics::sceAgcDriverSubmitDcb as u64),
+        "sceAgcDriverSubmitMultiAcbs" => Some(crate::graphics::sceAgcDriverSubmitMultiAcbs as u64),
+        "sceAgcDriverSubmitMultiDcbs" => Some(crate::graphics::sceAgcDriverSubmitMultiDcbs as u64),
+        "sceAgcDriverTriggerCapture" => Some(crate::graphics::sceAgcDriverTriggerCapture as u64),
+        "sceAgcDriverUnregisterAllResourcesForOwner" => Some(crate::graphics::sceAgcDriverUnregisterAllResourcesForOwner as u64),
+        "sceAgcDriverUnregisterOwnerAndResources" => Some(crate::graphics::sceAgcDriverUnregisterOwnerAndResources as u64),
+        "sceAgcDriverUnregisterResource" => Some(crate::graphics::sceAgcDriverUnregisterResource as u64),
+        "sceAgcDriverUnregisterWorkloadStream" => Some(crate::graphics::sceAgcDriverUnregisterWorkloadStream as u64),
+        "sceAgcGetDataPacketPayloadAddress" => Some(crate::graphics::sceAgcGetDataPacketPayloadAddress as u64),
+        "sceAgcGetGsOversubscription" => Some(crate::graphics::sceAgcGetGsOversubscription as u64),
+        "sceAgcInit" => Some(crate::graphics::sceAgcInit as u64),
+        "sceAgcQueueEndOfPipeActionPatchAddress" => Some(crate::graphics::sceAgcQueueEndOfPipeActionPatchAddress as u64),
+        "sceAgcQueueEndOfPipeActionPatchGcrCntl" => Some(crate::graphics::sceAgcQueueEndOfPipeActionPatchGcrCntl as u64),
+        "sceAgcQueueEndOfPipeActionPatchType" => Some(crate::graphics::sceAgcQueueEndOfPipeActionPatchType as u64),
+        "sceAgcSetCxRegIndirectPatchSetAddress" => Some(crate::graphics::sceAgcSetCxRegIndirectPatchSetAddress as u64),
+        "sceAgcSetShRegIndirectPatchSetAddress" => Some(crate::graphics::sceAgcSetShRegIndirectPatchSetAddress as u64),
+        "sceAgcSetUcRegIndirectPatchSetAddress" => Some(crate::graphics::sceAgcSetUcRegIndirectPatchSetAddress as u64),
+        "sceAgcSuspendPoint" => Some(crate::graphics::sceAgcSuspendPoint as u64),
+        "sceAgcWaitRegMemPatchAddress" => Some(crate::graphics::sceAgcWaitRegMemPatchAddress as u64),
+        "sceAgcWaitRegMemPatchCompareFunction" => Some(crate::graphics::sceAgcWaitRegMemPatchCompareFunction as u64),
+        "sceAgcWaitRegMemPatchMask" => Some(crate::graphics::sceAgcWaitRegMemPatchMask as u64),
+        "sceAgcWaitRegMemPatchReference" => Some(crate::graphics::sceAgcWaitRegMemPatchReference as u64),
+        "sceAgcWriteDataPatchSetAddressOrOffset" => Some(crate::graphics::sceAgcWriteDataPatchSetAddressOrOffset as u64),
+        "sceAgcWriteDataPatchSetCachePolicy" => Some(crate::graphics::sceAgcWriteDataPatchSetCachePolicy as u64),
+        "sceAgcWriteDataPatchSetDst" => Some(crate::graphics::sceAgcWriteDataPatchSetDst as u64),
         
         "sceSaveDataInitialize3" => Some(crate::save_data::sceSaveDataInitialize3 as u64),
         "sceSaveDataTerminate" => Some(crate::save_data::sceSaveDataTerminate as u64),
@@ -484,6 +627,12 @@ unsafe extern "sysv64" fn hle_atexit(func: u64) -> i32 {
 
 unsafe extern "sysv64" fn hle_catchReturnFromMain(status: i32) {
     info!("catchReturnFromMain called with status: {}", status);
+    // Wait for GPU to finish before exiting
+    if let Some(ref ctx) = *crate::graphics::VULKAN_CONTEXT.lock().unwrap() {
+        unsafe {
+            ctx.device.device_wait_idle().unwrap_or_default();
+        }
+    }
     std::process::exit(status);
 }
 
@@ -597,22 +746,6 @@ extern "sysv64" fn hle_Xtime_get_ticks() -> i64 {
 }
 
 extern "sysv64" fn hle_nexttowardl(x: f64, _y: f64) -> f64 { x }
-
-unsafe extern "sysv64" fn hle_sceAgcDriverSubmitDcb(
-    arg0: u64,
-    dcb_gpu_addr: u64,
-    dcb_size_in_dwords: u64,
-    _arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
-) -> i32 {
-    info!(
-        "API Driver Intercepted: sceAgcDriverSubmitDcb | Context: 0x{:X} | PacketAddress: 0x{:X} | Size: {} DWORDs",
-        arg0, dcb_gpu_addr, dcb_size_in_dwords
-    );
-    crate::graphics::decode_pm4_command_buffer(dcb_gpu_addr, dcb_size_in_dwords as u32);
-    0
-}
 
 unsafe extern "sysv64" fn hle_memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     std::ptr::copy_nonoverlapping(src, dest, n);
@@ -2398,12 +2531,12 @@ pub extern "sysv64" fn get_current_guest_fs() -> u64 {
 
 #[no_mangle]
 pub extern "sysv64" fn debug_hle_transition(host_fs: u64, syscall_res: i64) {
-    info!("DEBUG TRANSITION: host_fs=0x{:X}, syscall_res={}", host_fs, syscall_res);
+    log::trace!("DEBUG TRANSITION: host_fs=0x{:X}, syscall_res={}", host_fs, syscall_res);
 }
 
 #[no_mangle]
 pub extern "sysv64" fn debug_hle_return(guest_fs: u64, syscall_res: i64) {
-    info!("DEBUG RETURN: guest_fs=0x{:X}, syscall_res={}", guest_fs, syscall_res);
+    log::trace!("DEBUG RETURN: guest_fs=0x{:X}, syscall_res={}", guest_fs, syscall_res);
 }
 
 std::arch::global_asm!(
@@ -2468,7 +2601,9 @@ std::arch::global_asm!(
     "    pop rax",
     "",
     "    # Call target HLE function",
+    "    sub rsp, 8",
     "    call r11",
+    "    add rsp, 8",
     "",
     "    # Save return value registers",
     "    push rax",
@@ -2481,18 +2616,18 @@ std::arch::global_asm!(
     "    call get_current_guest_fs",
     "    add rsp, 8",
     "",
+    "    # Call debug_hle_return(guest_fs, syscall_res)",
+    "    # guest_fs is returned in rax. Save it to stack first, then call.",
+    "    push rax",
+    "    mov rdi, rax",
+    "    xor rsi, rsi",
+    "    call debug_hle_return",
+    "    pop rsi",
+    "",
     "    # Swap back to guest FS base",
-    "    mov rsi, rax",
     "    mov rax, 158",
     "    mov rdi, 0x1002",
     "    syscall",
-    "",
-    "    # Call debug_hle_return(guest_fs, syscall_res)",
-    "    mov rdi, rsi",
-    "    mov rsi, rax",
-    "    sub rsp, 8",
-    "    call debug_hle_return",
-    "    add rsp, 8",
     "",
     "    # Restore return registers",
     "    movdqu xmm0, [rsp]",

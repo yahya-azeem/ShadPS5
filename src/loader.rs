@@ -373,7 +373,7 @@ fn apply_custom_relocations(
         let sym_idx = (r_info >> 32) as usize;
         let rel_type = (r_info & 0xffffffff) as u32;
         
-        if r_offset >= 0x6CE000 && r_offset <= 0x6CEFFF {
+        if r_offset >= 0x6CC000 && r_offset <= 0x6D0FFF {
             let sym_name = if sym_idx < custom_symbols.len() { &custom_symbols[sym_idx].name } else { "" };
             info!("DEBUG RELOC GOT RANGE 0x{:X}: type={}, sym_idx={}, sym_name='{}', r_addend={}, is_sprx={}", r_offset, rel_type, sym_idx, sym_name, r_addend, is_sprx);
         }
@@ -475,7 +475,7 @@ fn apply_custom_relocations(
                             info!("DEBUG RELOC: strlen found! r_offset=0x{:X}, resolved_addr={:?}", r_offset, resolved_addr);
                         }
                         if let Some(addr) = resolved_addr {
-                            if r_offset >= 0x6CE000 && r_offset <= 0x6CEFFF {
+                            if r_offset >= 0x6CC000 && r_offset <= 0x6D0FFF {
                                 info!("DEBUG RELOC WRITING 0x{:X}: addr=0x{:X}", r_offset, addr);
                             }
                             unsafe { *host_got_slot = addr; }

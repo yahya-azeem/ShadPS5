@@ -1799,6 +1799,7 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
     let c_neg_0_75 = b.alloc_id();
     let c_1_25 = b.alloc_id();
     let c_1_5 = b.alloc_id();
+    let c_n1_0 = b.alloc_id();
     let c_zero_int = b.alloc_id();
 
     // Capabilities
@@ -1820,6 +1821,7 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
     ];
     if is_vertex {
         entry_args.push(out_pos_var);
+        entry_args.push(vertex_index_var);
         if has_vertex_buffer {
             entry_args.push(in_pos_var);
             if has_texture {
@@ -1829,8 +1831,6 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                 entry_args.push(in_color_var);
                 entry_args.push(out_color_var);
             }
-        } else {
-            entry_args.push(vertex_index_var);
         }
     } else {
         entry_args.push(out_color_var);
@@ -1860,9 +1860,8 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                 b.write_inst(71, &[in_color_var, 30, 1]); // Location 1
                 b.write_inst(71, &[out_color_var, 30, 0]); // Location 0
             }
-        } else {
-            b.write_inst(71, &[vertex_index_var, 11, 42]); // VertexIndex
         }
+        b.write_inst(71, &[vertex_index_var, 11, 42]); // VertexIndex
     } else {
         b.write_inst(71, &[out_color_var, 30, 0]); // Location 0
         if has_texture {
@@ -1931,6 +1930,7 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
     b.write_inst(59, &[ptr_in_uint_id, subgroup_local_invocation_id_var, 1]); // OpVariable Input
     if is_vertex {
         b.write_inst(59, &[ptr_out_vec4_id, out_pos_var, 3]); // Output Position
+        b.write_inst(59, &[ptr_in_int_id, vertex_index_var, 1]); // Input VertexIndex
         if has_vertex_buffer {
             b.write_inst(59, &[ptr_in_vec3_id, in_pos_var, 1]); // Input Position
             if has_texture {
@@ -1940,8 +1940,6 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                 b.write_inst(59, &[ptr_in_vec3_id, in_color_var, 1]); // Input Color
                 b.write_inst(59, &[ptr_out_vec3_id, out_color_var, 3]); // Output Color
             }
-        } else {
-            b.write_inst(59, &[ptr_in_int_id, vertex_index_var, 1]); // Input VertexIndex
         }
     } else {
         b.write_inst(59, &[ptr_out_vec4_id, out_color_var, 3]); // Output Color
@@ -1967,6 +1965,7 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
     b.write_inst(43, &[float_type_id, c_neg_0_75, 0xBF400000]); // -0.75
     b.write_inst(43, &[float_type_id, c_1_25, 0x3FA00000]); // 1.25
     b.write_inst(43, &[float_type_id, c_1_5, 0x3FC00000]); // 1.5
+    b.write_inst(43, &[float_type_id, c_n1_0, 0xBF800000]); // -1.0
     b.write_inst(43, &[int_type_id, c_zero_int, 0]); // 0 (int)
     b.write_inst(43, &[ulong_type_id, c_32_ulong, 32, 0]); // 32 (ulong)
     b.write_inst(43, &[uint_type_id, c_scope_workgroup, 2]); // 2 (uint)
@@ -2099,6 +2098,10 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                     b.write_inst(62, &[var_id, comp_val]);
                 }
             }
+            // Set alpha = 1.0 in VGPR 3
+            if let Some(&var_id) = vgpr_map.get(&3) {
+                b.write_inst(62, &[var_id, c_1_0]);
+            }
         }
     }
 
@@ -2192,8 +2195,10 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
     };
 
     // Branch from the entry block to the first basic block (label_id = 0)
-    let first_block_label = block_labels[&0];
-    b.write_inst(249, &[first_block_label]); // OpBranch to block 0
+    if !blocks.is_empty() {
+        let first_block_label = block_labels[&0];
+        b.write_inst(249, &[first_block_label]); // OpBranch to block 0
+    }
 
     // Process and translate each basic block in topological order
     for (block_idx, block) in blocks.iter().enumerate() {
@@ -2377,65 +2382,26 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                         b.write_inst(250, &[cond_id, block_labels[&target_pc], block_labels[&fallthrough_pc]]); // OpBranchConditional
                     }
                     Rdna2Instruction::EndPgm => {
-                        // Post-process output assignments on program end
+                        // DIAGNOSTIC: passthrough VB position, output red color
                         if is_vertex {
-                            let vg0 = vgpr_map.get(&0).copied().unwrap_or(c_0_0);
-                            let vg1 = vgpr_map.get(&1).copied().unwrap_or(c_0_0);
-                            let vg2 = vgpr_map.get(&2).copied().unwrap_or(c_0_0);
-                            
-                            let val0 = b.alloc_id(); b.write_inst(61, &[float_type_id, val0, if vg0 != c_0_0 { vg0 } else { c_0_0 }]);
-                            let val1 = b.alloc_id(); b.write_inst(61, &[float_type_id, val1, if vg1 != c_0_0 { vg1 } else { c_0_0 }]);
-                            let val2 = b.alloc_id(); b.write_inst(61, &[float_type_id, val2, if vg2 != c_0_0 { vg2 } else { c_0_0 }]);
-                            
-                            if has_vertex_buffer {
-                                let out_pos_val = b.alloc_id();
-                                b.write_inst(80, &[vec4_type_id, out_pos_val, val0, val1, val2, c_1_0]); // OpCompositeConstruct
-                                b.write_inst(62, &[out_pos_var, out_pos_val]);
-                                
-                                let vg3 = vgpr_map.get(&3).copied().unwrap_or(c_0_0);
-                                let vg4 = vgpr_map.get(&4).copied().unwrap_or(c_0_0);
-                                let vg5 = vgpr_map.get(&5).copied().unwrap_or(c_0_0);
-                                
-                                let val3 = b.alloc_id(); b.write_inst(61, &[float_type_id, val3, if vg3 != c_0_0 { vg3 } else { c_0_0 }]);
-                                let val4 = b.alloc_id(); b.write_inst(61, &[float_type_id, val4, if vg4 != c_0_0 { vg4 } else { c_0_0 }]);
-                                
-                                if has_texture {
-                                    let out_tex_val = b.alloc_id();
-                                    b.write_inst(80, &[vec2_type_id, out_tex_val, val3, val4]);
-                                    b.write_inst(62, &[out_tex_var, out_tex_val]);
-                                } else {
-                                    let val5 = b.alloc_id(); b.write_inst(61, &[float_type_id, val5, if vg5 != c_0_0 { vg5 } else { c_0_0 }]);
-                                    let out_color_val = b.alloc_id();
-                                    b.write_inst(80, &[vec3_type_id, out_color_val, val3, val4, val5]);
-                                    b.write_inst(62, &[out_color_var, out_color_val]);
-                                }
-                            } else {
-                                // Algebraic fallback for original triangle draw (vb-less)
-                                let vertex_index_val = b.alloc_id();
-                                b.write_inst(61, &[int_type_id, vertex_index_val, vertex_index_var]); // OpLoad
-                                let f_id = b.alloc_id();
-                                b.write_inst(111, &[float_type_id, f_id, vertex_index_val]); // OpConvertSToF
-                                let f2_id = b.alloc_id();
-                                b.write_inst(131, &[float_type_id, f2_id, f_id, f_id]); // OpFMul
-                                let t0_id = b.alloc_id();
-                                b.write_inst(131, &[float_type_id, t0_id, c_neg_0_75, f2_id]); // OpFMul
-                                let t1_id = b.alloc_id();
-                                b.write_inst(131, &[float_type_id, t1_id, c_1_25, f_id]); // OpFMul
-                                let x_id = b.alloc_id();
-                                b.write_inst(129, &[float_type_id, x_id, t0_id, t1_id]); // OpFAdd
-                                let t2_id = b.alloc_id();
-                                b.write_inst(131, &[float_type_id, t2_id, c_neg_0_5, f2_id]); // OpFMul
-                                let t3_id = b.alloc_id();
-                                b.write_inst(131, &[float_type_id, t3_id, c_1_5, f_id]); // OpFMul
-                                let t4_id = b.alloc_id();
-                                b.write_inst(129, &[float_type_id, t4_id, t2_id, t3_id]); // OpFAdd
-                                let y_id = b.alloc_id();
-                                b.write_inst(129, &[float_type_id, y_id, t4_id, c_neg_0_5]); // OpFAdd
-        
-                                let pos_val = b.alloc_id();
-                                b.write_inst(80, &[vec4_type_id, pos_val, x_id, y_id, c_0_0, c_1_0]); // OpCompositeConstruct
-                                b.write_inst(62, &[out_pos_var, pos_val]); // OpStore
-                            }
+                            let in_pos = b.alloc_id();
+                            b.write_inst(61, &[vec3_type_id, in_pos, in_pos_var]); // OpLoad from VB
+                            let px = b.alloc_id(); b.write_inst(81, &[float_type_id, px, in_pos, 0]);
+                            let py = b.alloc_id(); b.write_inst(81, &[float_type_id, py, in_pos, 1]);
+                            let pz = b.alloc_id(); b.write_inst(81, &[float_type_id, pz, in_pos, 2]);
+                            let pos_val = b.alloc_id();
+                            b.write_inst(80, &[vec4_type_id, pos_val, px, py, pz, c_1_0]);
+                            b.write_inst(62, &[out_pos_var, pos_val]);
+
+                            // Color output: red for all vertices
+                            let red_col = b.alloc_id();
+                            b.write_inst(80, &[vec3_type_id, red_col, c_1_0, c_0_0, c_0_0]);
+                            b.write_inst(62, &[out_color_var, red_col]);
+
+                            // Color output: red for all vertices
+                            let red_col = b.alloc_id();
+                            b.write_inst(80, &[vec3_type_id, red_col, c_1_0, c_0_0, c_0_0]);
+                            b.write_inst(62, &[out_color_var, red_col]);
                         } else {
                             // Fragment output Color
                             let vg0 = vgpr_map.get(&0).copied().unwrap_or(c_1_0);
@@ -2448,7 +2414,6 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                             let val2 = b.alloc_id(); b.write_inst(61, &[float_type_id, val2, if vg2 != c_0_0 { vg2 } else { c_0_0 }]);
                             
                             if has_texture {
-                                // Blend loaded texture color
                                 let sampled_img = b.alloc_id();
                                 b.write_inst(61, &[sampled_image_type_id, sampled_img, sampler_var_id]);
                                 let uv_var_0 = vgpr_map.get(&0).copied().unwrap_or(c_0_0);
@@ -2467,9 +2432,8 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                                 b.write_inst(61, &[vec4_type_id, loaded_color_id, member_ptr_id]); // Load
                                 b.write_inst(62, &[out_color_var, loaded_color_id]); // Store
                             } else {
-                                let val3 = b.alloc_id(); b.write_inst(61, &[float_type_id, val3, if vg3 != c_1_0 { vg3 } else { c_1_0 }]);
                                 let out_color_val = b.alloc_id();
-                                b.write_inst(80, &[vec4_type_id, out_color_val, val0, val1, val2, val3]); // OpCompositeConstruct
+                                b.write_inst(80, &[vec4_type_id, out_color_val, c_1_0, c_0_0, c_0_0, c_1_0]); // OpCompositeConstruct solid red
                                 b.write_inst(62, &[out_color_var, out_color_val]);
                             }
                         }
@@ -3030,6 +2994,66 @@ pub fn translate_to_spirv(instructions: &[Rdna2Instruction], is_vertex: bool, ha
                 b.write_inst(253, &[]); // OpReturn fallback
             }
         }
+    }
+    if blocks.is_empty() {
+        // Entry label already emitted at line 1982 — use it directly
+        if is_vertex {
+            if has_vertex_buffer {
+                // Pass through vertex position from input to output
+                let in_pos = b.alloc_id();
+                b.write_inst(61, &[vec3_type_id, in_pos, in_pos_var]); // OpLoad
+                let px = b.alloc_id(); b.write_inst(81, &[float_type_id, px, in_pos, 0]);
+                let py = b.alloc_id(); b.write_inst(81, &[float_type_id, py, in_pos, 1]);
+                let pz = b.alloc_id(); b.write_inst(81, &[float_type_id, pz, in_pos, 2]);
+                let pos_out = b.alloc_id();
+                b.write_inst(80, &[vec4_type_id, pos_out, px, py, pz, c_1_0]);
+                b.write_inst(62, &[out_pos_var, pos_out]);
+                if has_texture {
+                    let in_tex = b.alloc_id();
+                    b.write_inst(61, &[vec2_type_id, in_tex, in_tex_var]); // OpLoad
+                    let tu = b.alloc_id(); b.write_inst(81, &[float_type_id, tu, in_tex, 0]);
+                    let tv = b.alloc_id(); b.write_inst(81, &[float_type_id, tv, in_tex, 1]);
+                    let tex_out = b.alloc_id();
+                    b.write_inst(80, &[vec2_type_id, tex_out, tu, tv]);
+                    b.write_inst(62, &[out_tex_var, tex_out]);
+                } else {
+                    let in_col = b.alloc_id();
+                    b.write_inst(61, &[vec3_type_id, in_col, in_color_var]); // OpLoad
+                    let cr = b.alloc_id(); b.write_inst(81, &[float_type_id, cr, in_col, 0]);
+                    let cg = b.alloc_id(); b.write_inst(81, &[float_type_id, cg, in_col, 1]);
+                    let cb = b.alloc_id(); b.write_inst(81, &[float_type_id, cb, in_col, 2]);
+                    let col_out = b.alloc_id();
+                    b.write_inst(80, &[vec3_type_id, col_out, cr, cg, cb]);
+                    b.write_inst(62, &[out_color_var, col_out]);
+                }
+            } else {
+                let pos_val = b.alloc_id();
+                b.write_inst(80, &[vec4_type_id, pos_val, c_0_0, c_0_0, c_0_0, c_1_0]); // OpCompositeConstruct (0,0,0,1)
+                b.write_inst(62, &[out_pos_var, pos_val]); // OpStore gl_Position
+            }
+        } else {
+            if has_texture {
+                let sampled_img = b.alloc_id();
+                b.write_inst(61, &[sampled_image_type_id, sampled_img, sampler_var_id]);
+                let in_tex = b.alloc_id();
+                b.write_inst(61, &[vec2_type_id, in_tex, in_tex_var]);
+                let tex_color = b.alloc_id();
+                b.write_inst(87, &[vec4_type_id, tex_color, sampled_img, in_tex]);
+                b.write_inst(62, &[out_color_var, tex_color]);
+            } else if has_constant_buffer {
+                let member_ptr = b.alloc_id();
+                b.write_inst(65, &[ptr_uniform_vec4_id, member_ptr, uniform_var_id, c_zero_int]); // AccessChain
+                let loaded = b.alloc_id();
+                b.write_inst(61, &[vec4_type_id, loaded, member_ptr]); // OpLoad
+                b.write_inst(62, &[out_color_var, loaded]);
+            } else {
+                // Bypass vertex color — emit solid red for diagnostic
+                let col_out = b.alloc_id();
+                b.write_inst(80, &[vec4_type_id, col_out, c_1_0, c_0_0, c_0_0, c_1_0]); // (1,0,0,1)
+                b.write_inst(62, &[out_color_var, col_out]);
+            }
+        }
+        b.write_inst(253, &[]); // OpReturn
     }
     b.write_inst(56, &[]); // OpFunctionEnd
 

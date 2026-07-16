@@ -53,6 +53,14 @@ pub extern "sysv64" fn sceUserServiceGetUserName(
 }
 
 #[no_mangle]
+pub extern "sysv64" fn sceUserServiceGetEvent(
+    _event: *mut std::ffi::c_void,
+) -> i32 {
+    info!("API UserService Intercepted: sceUserServiceGetEvent");
+    0x80960007u32 as i32 // SCE_USER_SERVICE_ERROR_NO_EVENT
+}
+
+#[no_mangle]
 pub extern "sysv64" fn sceUserServiceTerminate() -> i32 {
     info!("API UserService Intercepted: sceUserServiceTerminate");
     0
