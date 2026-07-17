@@ -82,6 +82,18 @@ pub const SCE_KERNEL_MAIN_DMEM_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
 static GUEST_VM_BUMP: AtomicU64 = AtomicU64::new(0x700000000000);
 
+/// Tracks the current program break for sys_obreak (sbrk).
+/// Updated by sys_obreak (syscall 17) on each call.
+static CURRENT_BREAK: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the initial program break, typically called by the ELF loader
+/// after mapping all segments. The value should be the page-aligned
+/// guest virtual address right after the last BSS segment.
+pub fn set_initial_break(addr: u64) {
+    CURRENT_BREAK.store(addr, Ordering::SeqCst);
+    info!("Initial break set to 0x{:X}", addr);
+}
+
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct sock_filter {
@@ -324,6 +336,158 @@ pub fn dispatch_syscall(syscall_num: u32, args: &[u64]) -> SyscallResult {
                 }
             }
             SyscallResult::Success(0)
+        }
+
+        // sys_sigprocmask - FreeBSD ID: 340
+        340 => {
+            let how = args[0];
+            let set_ptr = args[1] as *const u64;
+            let oset_ptr = args[2] as *mut u64;
+            info!("Syscall (sigprocmask): how={}", how);
+            if !oset_ptr.is_null() {
+                unsafe { *oset_ptr = 0; }
+            }
+            SyscallResult::Success(0)
+        }
+
+        // sys_sigaction - FreeBSD ID: 46
+        46 => {
+            let sig = args[0] as i32;
+            let act_ptr = args[1];
+            let oact_ptr = args[2];
+            info!("Syscall (sigaction): sig={}, act=0x{:X}, oact=0x{:X}", sig, act_ptr, oact_ptr);
+            SyscallResult::Success(0)
+        }
+
+        // sys_sigaltstack - FreeBSD ID: 53
+        53 => {
+            info!("Syscall (sigaltstack)");
+            SyscallResult::Success(0)
+        }
+
+        // sys_gettimeofday - FreeBSD ID: 116
+        116 => {
+            let tp_ptr = args[0] as *mut libc::timeval;
+            let tzp_ptr = args[1] as *mut libc::timezone;
+            if !tp_ptr.is_null() {
+                unsafe {
+                    libc::gettimeofday(tp_ptr, tzp_ptr);
+                }
+            }
+            SyscallResult::Success(0)
+        }
+
+        // sys_obreak - FreeBSD ID: 17
+        17 => {
+            let nval = args[0];
+            let page_size = SCE_KERNEL_PAGE_SIZE as u64;
+
+            let current = CURRENT_BREAK.load(Ordering::SeqCst);
+            info!("Syscall (obreak): nval=0x{:X}, current=0x{:X}", nval, current);
+
+            if current == 0 {
+                // CURRENT_BREAK was not set by the loader (shouldn't happen).
+                // Initialise it from the first call so subsequent expansions can work.
+                if nval > 0 {
+                    CURRENT_BREAK.store(nval, Ordering::SeqCst);
+                }
+                return SyscallResult::Success(0);
+            }
+
+            if nval > current {
+                let alloc_start = current;
+                let alloc_size = (nval - current) as usize;
+                let aligned_size = (alloc_size + page_size as usize - 1) & !(page_size as usize - 1);
+
+                if aligned_size > 0 {
+                    info!("  obreak expand: mapping [0x{:X} – 0x{:X}] size=0x{:X}",
+                          alloc_start, alloc_start + aligned_size as u64, aligned_size);
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        let ptr = unsafe {
+                            libc::mmap(
+                                alloc_start as *mut libc::c_void,
+                                aligned_size,
+                                libc::PROT_READ | libc::PROT_WRITE,
+                                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                                -1,
+                                0,
+                            )
+                        };
+                        if ptr == libc::MAP_FAILED {
+                            let err = std::io::Error::last_os_error();
+                            error!("  obreak expand mmap failed: {}; continuing anyway", err);
+                        }
+                    }
+                }
+                CURRENT_BREAK.store(nval, Ordering::SeqCst);
+                SyscallResult::Success(0)
+            } else if nval < current {
+                info!("  obreak: contract (unsupported, just tracking) to 0x{:X}", nval);
+                CURRENT_BREAK.store(nval, Ordering::SeqCst);
+                SyscallResult::Success(0)
+            } else {
+                SyscallResult::Success(0)
+            }
+        }
+
+        // sys_open - FreeBSD ID: 5
+        5 => {
+            let path_ptr = args[0] as *const libc::c_char;
+            let flags = args[1] as i32;
+            let mode = args[2] as i32;
+            let path = if !path_ptr.is_null() {
+                unsafe { std::ffi::CStr::from_ptr(path_ptr).to_string_lossy().into_owned() }
+            } else {
+                "null".to_string()
+            };
+            info!("Syscall (open): path={}, flags=0x{:X}, mode=0x{:X}", path, flags, mode);
+            SyscallResult::Success(-1i64 as u64)
+        }
+
+        // sys_read - FreeBSD ID: 3
+        3 => {
+            let fd = args[0];
+            let buf_ptr = args[1] as *mut u8;
+            let count = args[2] as usize;
+            info!("Syscall (read): fd={}, count={}", fd, count);
+            SyscallResult::Success(0)
+        }
+
+        // sys_close - FreeBSD ID: 6
+        6 => {
+            let fd = args[0];
+            info!("Syscall (close): fd={}", fd);
+            SyscallResult::Success(0)
+        }
+
+        // sys_thr_self - FreeBSD ID: 432
+        432 => {
+            let tid_ptr = args[0] as *mut i32;
+            let current_tid = CURRENT_TID.with(|cell| cell.get());
+            if !tid_ptr.is_null() {
+                unsafe { *tid_ptr = current_tid; }
+            }
+            info!("Syscall (thr_self): returning tid={}", current_tid);
+            SyscallResult::Success(0)
+        }
+
+        // sys_getdents - FreeBSD ID: 78
+        78 => {
+            let fd = args[0];
+            let buf_ptr = args[1];
+            let count = args[2] as usize;
+            info!("Syscall (getdents): fd={}, count={}", fd, count);
+            SyscallResult::Success(0)
+        }
+
+        // sys_fstat - FreeBSD ID: 551
+        551 => {
+            let fd = args[0];
+            let sb_ptr = args[1];
+            info!("Syscall (fstat): fd={}, sb=0x{:X}", fd, sb_ptr);
+            SyscallResult::Success(-1i64 as u64)
         }
 
         // sys__umtx_op - FreeBSD ID: 454

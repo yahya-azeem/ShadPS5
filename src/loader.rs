@@ -677,6 +677,13 @@ pub fn load_executable(path: &Path) -> Result<ProsperoExecutable, &'static str> 
         }
     }
 
+    // Set initial program break for sys_obreak right after the last mapped segment.
+    // max_vaddr is the end of the last LOAD segment in raw ELF vaddr space.
+    let guest_page_size: u64 = 0x4000; // SCE_KERNEL_PAGE_SIZE
+    let guest_break = load_bias + (max_vaddr - min_vaddr);
+    let aligned_break = (guest_break + guest_page_size - 1) & !(guest_page_size - 1);
+    crate::kernel::set_initial_break(aligned_break);
+
     let host_entrypoint = load_bias + (entrypoint - min_vaddr);
 
     // Initialize the symbol NID mapping table
@@ -1014,6 +1021,7 @@ fn resolve_symbol_address(name: &str) -> Option<u64> {
        base_name == "sceAmprCommandBufferPopMarker" || name.contains("sceAmprCommandBufferPopMarker") {
         info!("DEBUG resolve_symbol_address('{}') -> {:?}", name, res);
     }
+
     res
 }
 
