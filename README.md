@@ -1,4 +1,5 @@
-# ShadPS5 — High-Level PlayStation 5 Emulator Base
+# ShadPS5 — High-Level PlayStation 5 Emulator Base (Discontinued)
+
 
 ShadPS5 is a cross-platform, high-level emulator (compatibility layer) for the PlayStation 5 (Prospero OS), written in **Rust**. It maps FreeBSD 11 kernel system calls and translates Agile Graphics Command (AGC) PM4 packet streams directly to Vulkan API calls on host desktop environments (Windows and Linux).
 
